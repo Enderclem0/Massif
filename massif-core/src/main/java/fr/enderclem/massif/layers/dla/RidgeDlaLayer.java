@@ -40,17 +40,21 @@ import java.util.Set;
  * upscaled skeleton.
  *
  * <h2>Walker algorithm</h2>
- * Each level runs a fixed walker budget. Walkers spawn on a square ring a
- * few cells <em>outside</em> the image and random-walk into the grid. Spawning
- * outside is what keeps walkers from pinning against the grid edge: a walker
- * that spawns at {@code x=0} has its first stick-check evaluated there and
- * tends to glue to the boundary; spawned at {@code x=-spawnMargin} it has to
- * traverse into the region before it can stick. Motion is unclamped, so
- * walkers may drift out the far side and come back, which keeps in-region
- * aggregate density uniform. Termination: stick (an orthogonal neighbour is
- * frozen), step-count, or drift past the kill radius from the grid centre.
+ * Each level runs a fixed walker budget. Walkers spawn at a uniformly
+ * random mountain-zone <em>perimeter</em> cell — a mountain cell with at
+ * least one non-mountain 4-neighbour (or one at the region edge). Spawning
+ * at the zone perimeter instead of anywhere inside the zone is what
+ * preserves classical DLA branching: walkers start away from the aggregate
+ * and random-walk inward until they're absorbed at the first branch tip
+ * they hit, so outer branches grow longer over time and inner gaps don't
+ * fill in. Using all mountain cells collapses the aggregate into a uniform
+ * blob because walkers spawn adjacent to the aggregate and stick in one
+ * step. Motion is unclamped (walkers may drift out of the grid and back).
+ * Termination: stick (orthogonal neighbour is frozen),
+ * spawn-landed-on-aggregate, step-count, or drift past the kill radius.
  * On stick, the walker records its parent (the frozen neighbour that caught
- * it); these parent pointers drive the line-connection upscale between levels.
+ * it); those parent pointers drive the line-connection upscale between
+ * levels.
  *
  * <h2>Mountain-aware seeding</h2>
  * Mountain cells in the region are flood-filled into connected components;
@@ -82,19 +86,6 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
     /** Walkers per level = {@code size² / WALKER_DENSITY_DIVISOR}. */
     private static final int WALKER_DENSITY_DIVISOR = 4;
     private static final int MAX_STEPS_PER_WALKER = 600;
-    /**
-     * Outer ring of the final 256×256 mask that is forced to zero
-     * (exemptions at handshake seeds). Prevents the "solid aggregate line
-     * along the grid edge" artifact caused by seeds quantising onto the
-     * boundary at low pyramid levels and propagating there through every
-     * upscale, and by walkers entering at the grid edge and sticking on the
-     * first interior cell. This output-time clip is the single mechanism for
-     * border cleanup — a min-walk-steps filter inside {@link #runDla} was
-     * tried but rejected: it also killed legitimate walkers sticking near
-     * cluster seeds that happened to quantise near the grid edge, leaving
-     * whole mountain clusters with no DLA growth.
-     */
-    private static final int BORDER_CLEAR = 4;
 
     // Height bump tuning.
     private static final double RIDGE_AMPLITUDE = 0.55;
@@ -223,6 +214,45 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
 
         if (seeds256.isEmpty()) return new byte[regionSize][regionSize];
 
+        // Walker spawn pool: mountain-zone PERIMETER cells (mountain cells
+        // with at least one non-mountain 4-neighbour, or at the region edge
+        // treating out-of-bounds as non-mountain). Classical DLA branching
+        // needs walkers to start away from the aggregate so they traverse
+        // existing branches and get absorbed at outer tips — sampling all
+        // mountain cells makes walkers spawn adjacent to the aggregate and
+        // stick in one step, collapsing the result into a solid blob.
+        int mountainKind = ZoneKind.MOUNTAINS.ordinal();
+        int[] perimX;
+        int[] perimZ;
+        {
+            int count = 0;
+            for (int z = 0; z < regionSize; z++) {
+                for (int x = 0; x < regionSize; x++) {
+                    if (zones[z][x] == mountainKind && isMountainPerimeter(zones, x, z, regionSize, mountainKind)) {
+                        count++;
+                    }
+                }
+            }
+            perimX = new int[count];
+            perimZ = new int[count];
+            int i = 0;
+            for (int z = 0; z < regionSize; z++) {
+                for (int x = 0; x < regionSize; x++) {
+                    if (zones[z][x] == mountainKind && isMountainPerimeter(zones, x, z, regionSize, mountainKind)) {
+                        perimX[i] = x;
+                        perimZ[i] = z;
+                        i++;
+                    }
+                }
+            }
+        }
+        // With no perimeter (region entirely non-mountain, already handled
+        // by the earlier seed-empty bailout) there's no walker pool. A
+        // region whose only mountain cells are a single interior dot has
+        // 0 perimeter by this definition — unlikely in practice, but a
+        // safety check avoids a div-by-zero in runDla.
+        if (perimX.length == 0) return new byte[regionSize][regionSize];
+
         Random random = new Random(chunkSeed);
         int firstSize = PYRAMID_SIZES[0];
         boolean[][] frozen = new boolean[firstSize][firstSize];
@@ -247,38 +277,30 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
                 parent = newParent;
             }
 
-            // Anchor = grid centre, since multiple clusters may be anywhere.
-            // Kill radius of 2×size covers the full grid plus margin, so all
-            // clusters are reachable from any walker spawn.
+            // Anchor = grid centre, kill radius = 2×size. Keeps walkers that
+            // drift far out of bounds from burning the whole step budget.
             int anchorX = size / 2, anchorZ = size / 2;
             int walkers = (size * size) / WALKER_DENSITY_DIVISOR;
-            // Walkers spawn outside the grid and need to random-walk in to
-            // find the aggregate. Expected steps to traverse D cells is O(D²).
-            // Scaling linearly with size gives a budget that lets walkers
-            // cover a gap of ~sqrt(size·k) cells — comfortably more than the
-            // spawn-to-aggregate gap at every level in practice.
+            // Walker budget: walker may random-walk up to {@code size·8}
+            // steps before giving up. With mountain-interior spawn the
+            // expected gap to aggregate is much smaller than with
+            // outside-grid spawn, so most walkers stick well before this.
             int maxSteps = Math.max(MAX_STEPS_PER_WALKER, size * 8);
-            runDla(frozen, parent, size, walkers, maxSteps, anchorX, anchorZ, random);
+            runDla(frozen, parent, size, walkers, maxSteps,
+                   anchorX, anchorZ, perimX, perimZ, regionSize, random);
         }
 
-        // frozen is now at the final pyramid size == regionSize. The outer
-        // BORDER_CLEAR ring is forced to zero EXCEPT within a small radius
-        // around handshake mountain seed positions. The clear kills the
-        // boundary-hug artifact (seeds quantising to x=0, walkers entering
-        // and sticking on the first interior cell). The per-handshake
-        // preserve patches keep the exact cells where scope §2 Layer A
-        // sanctions a cross-region ridge crossing — without them we'd also
-        // erase the very aggregate both sides agreed on.
-        boolean[][] preserve = preserveMaskAroundHandshakes(handshakeSeeds, regionSize);
+        // No border clear: walker spawn is interior by construction, so the
+        // grid-edge clutter mechanism that forced the old ring-clear no
+        // longer applies. Cells at the very edge are only frozen where a
+        // mountain zone genuinely extends to the region boundary (including
+        // handshake seeds), which is what lets ridges cross regions.
         boolean fullMode = strip.x0() == 0 && strip.z0() == 0
                         && strip.width() == regionSize && strip.height() == regionSize;
         byte[][] mask = new byte[regionSize][regionSize];
         for (int z = 0; z < regionSize; z++) {
             for (int x = 0; x < regionSize; x++) {
                 if (!frozen[z][x]) continue;
-                boolean inBorderRing = x < BORDER_CLEAR || x >= regionSize - BORDER_CLEAR
-                                    || z < BORDER_CLEAR || z >= regionSize - BORDER_CLEAR;
-                if (inBorderRing && !preserve[z][x]) continue;
                 if (fullMode || strip.contains(x, z)) {
                     mask[z][x] = 1;
                 }
@@ -288,11 +310,17 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
     }
 
     /**
-     * Radius (in cells) around a handshake seed that stays unclipped by the
-     * border-clear pass. Picked to exceed {@link #BORDER_CLEAR} so the
-     * preserved patch actually extends through the ring.
+     * True if {@code (x, z)} is a mountain cell with at least one 4-neighbour
+     * that is <em>not</em> a mountain cell, or sits on a region edge. The
+     * walker spawn pool is restricted to these perimeter cells.
      */
-    private static final int HANDSHAKE_PRESERVE_RADIUS = 6;
+    private static boolean isMountainPerimeter(int[][] zones, int x, int z, int size, int mountainKind) {
+        if (x == 0            || zones[z][x - 1] != mountainKind) return true;
+        if (x == size - 1     || zones[z][x + 1] != mountainKind) return true;
+        if (z == 0            || zones[z - 1][x] != mountainKind) return true;
+        if (z == size - 1     || zones[z + 1][x] != mountainKind) return true;
+        return false;
+    }
 
     /**
      * Handshake nodes whose own-region side is a mountain zone become extra
@@ -327,28 +355,6 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
             out.add(new int[] { x, z });
         }
         return out;
-    }
-
-    /**
-     * Build a boolean mask marking cells within {@link #HANDSHAKE_PRESERVE_RADIUS}
-     * (Chebyshev) of any handshake seed. Used to exempt those cells from
-     * the outer-ring border clear — otherwise we'd zero the very aggregate
-     * both sides of the boundary agreed on.
-     */
-    private static boolean[][] preserveMaskAroundHandshakes(List<int[]> handshakeSeeds, int size) {
-        boolean[][] preserve = new boolean[size][size];
-        int r = HANDSHAKE_PRESERVE_RADIUS;
-        for (int[] s : handshakeSeeds) {
-            int hx = s[0], hz = s[1];
-            int z0 = Math.max(0, hz - r), z1 = Math.min(size - 1, hz + r);
-            int x0 = Math.max(0, hx - r), x1 = Math.min(size - 1, hx + r);
-            for (int z = z0; z <= z1; z++) {
-                for (int x = x0; x <= x1; x++) {
-                    preserve[z][x] = true;
-                }
-            }
-        }
-        return preserve;
     }
 
     /**
@@ -409,39 +415,32 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
     }
 
     /**
-     * Walker pass. Walkers spawn on a square ring OUTSIDE the grid (offset by
-     * {@code spawnMargin} beyond the image boundary) and random-walk in.
-     * Walking is unclamped — walkers may cross the image edge freely in both
-     * directions, so they can leave and drift back in. Any interior stick is
-     * accepted; boundary cluttering is handled at output time by
-     * {@link #BORDER_CLEAR} rather than by filtering walkers mid-pass (a
-     * per-walker filter would also discard legitimate sticks near seeds that
-     * quantised close to the grid edge, leaving entire clusters un-grown).
-     * Termination: stick, max-steps, or drift past the kill radius from the
-     * anchor.
+     * Walker pass. Each walker spawns at a uniformly random mountain-zone
+     * perimeter cell (the {@code spawnX/Z} arrays are the flat list at
+     * {@code sourceSize} resolution — typically 256 — scaled down to the
+     * current pyramid size). Random-walking is unclamped: walkers may drift
+     * out of the grid and back. On stick, the caught frozen neighbour
+     * becomes the parent pointer so the next upscale can draw a line.
+     * Termination: stick, spawn-landed-on-aggregate, max-steps, or drift
+     * past the kill radius from the anchor.
      */
     private static void runDla(boolean[][] frozen, int[][] parent, int size,
                                int walkerCount, int maxSteps,
-                               int anchorX, int anchorZ, Random rng) {
+                               int anchorX, int anchorZ,
+                               int[] spawnX, int[] spawnZ, int sourceSize,
+                               Random rng) {
         long killR = (long) size * 2L;
         long killRSq = killR * killR;
-        int spawnMargin = Math.max(2, size / 16);
-        int spawnSpan = size + 2 * spawnMargin;
+        int nSpawn = spawnX.length;
 
         for (int i = 0; i < walkerCount; i++) {
-            int side = rng.nextInt(4);
-            int pos = rng.nextInt(spawnSpan) - spawnMargin;
-            int px, pz;
-            switch (side) {
-                case 0:  px = -spawnMargin;           pz = pos;                    break;
-                case 1:  px = size + spawnMargin - 1; pz = pos;                    break;
-                case 2:  px = pos;                    pz = -spawnMargin;           break;
-                default: px = pos;                    pz = size + spawnMargin - 1; break;
-            }
+            int idx = rng.nextInt(nSpawn);
+            int px = (spawnX[idx] * size) / sourceSize;
+            int pz = (spawnZ[idx] * size) / sourceSize;
 
             for (int step = 0; step < maxSteps; step++) {
                 if (px >= 0 && px < size && pz >= 0 && pz < size) {
-                    if (frozen[pz][px]) break; // walked onto aggregate — nothing to add
+                    if (frozen[pz][px]) break; // spawned on / walked onto aggregate
                     int parentIdx = firstFrozenNeighborIndex(px, pz, frozen, size);
                     if (parentIdx >= 0) {
                         frozen[pz][px] = true;
