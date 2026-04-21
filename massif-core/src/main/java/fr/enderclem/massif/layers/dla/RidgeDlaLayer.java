@@ -6,10 +6,16 @@ import fr.enderclem.massif.dag.LayerContext;
 import fr.enderclem.massif.dag.NeighbourCache;
 import fr.enderclem.massif.dag.StripSpec;
 import fr.enderclem.massif.layers.Features;
+import fr.enderclem.massif.layers.voronoi.HandshakeGraph;
+import fr.enderclem.massif.layers.voronoi.HandshakeGraph.Edge;
+import fr.enderclem.massif.layers.voronoi.HandshakeGraph.HandshakeNode;
+import fr.enderclem.massif.layers.voronoi.HandshakeLayerImpl;
 import fr.enderclem.massif.layers.voronoi.VoronoiClassifier;
 import fr.enderclem.massif.layers.voronoi.ZoneKind;
 import fr.enderclem.massif.primitives.RegionCoord;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Random;
 import java.util.Set;
 
@@ -47,11 +53,15 @@ import java.util.Set;
  * it); these parent pointers drive the line-connection upscale between levels.
  *
  * <h2>Mountain-aware seeding</h2>
- * The initial seed at level 0 is placed at the mountain cell closest to the
- * region centre (scaled down from 256 to the initial pyramid size). Regions
- * with no mountain cells short-circuit to an empty mask: ridge height is
- * zone-gated downstream, so any aggregate grown in non-mountain zones would
- * be invisible.
+ * Mountain cells in the region are flood-filled into connected components;
+ * every component gets its own seed placed at the cell nearest that
+ * component's centroid. This is what makes regions with several disconnected
+ * mountain areas get DLA growing in every area rather than only the one
+ * closest to the region centre. Seeds are scaled down to the first pyramid
+ * level; when multiple clusters quantise onto the same 8-grid cell they
+ * collapse into one starting cell, which is fine — successive upscales
+ * re-separate them via the line-connection draw. Regions with no mountain
+ * cells short-circuit to an empty mask.
  *
  * <h2>Border-strip mode (cross-region continuity)</h2>
  * {@link #computeBorderStrip} currently recomputes the full-region aggregate
@@ -72,6 +82,19 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
     /** Walkers per level = {@code size² / WALKER_DENSITY_DIVISOR}. */
     private static final int WALKER_DENSITY_DIVISOR = 4;
     private static final int MAX_STEPS_PER_WALKER = 600;
+    /**
+     * Outer ring of the final 256×256 mask that is forced to zero
+     * (exemptions at handshake seeds). Prevents the "solid aggregate line
+     * along the grid edge" artifact caused by seeds quantising onto the
+     * boundary at low pyramid levels and propagating there through every
+     * upscale, and by walkers entering at the grid edge and sticking on the
+     * first interior cell. This output-time clip is the single mechanism for
+     * border cleanup — a min-walk-steps filter inside {@link #runDla} was
+     * tried but rejected: it also killed legitimate walkers sticking near
+     * cluster seeds that happened to quantise near the grid edge, leaving
+     * whole mountain clusters with no DLA growth.
+     */
+    private static final int BORDER_CLEAR = 4;
 
     // Height bump tuning.
     private static final double RIDGE_AMPLITUDE = 0.55;
@@ -185,36 +208,31 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
         int regionSize = Features.REGION_SIZE;
         long chunkSeed = seed ^ (coord.rx() * 341873128712L) ^ ((long) coord.rz() * 132897987541L);
 
-        // Pick seed location: mountain cell closest to the geometric centre.
-        // If there are no mountain cells, skip DLA entirely.
         int[][] zones = VoronoiClassifier.classify(seed, coord, regionSize);
-        int mountainKind = ZoneKind.MOUNTAINS.ordinal();
-        int seedX256 = -1, seedZ256 = -1;
-        int bestDistSq = Integer.MAX_VALUE;
-        int centre = regionSize / 2;
-        for (int z = 0; z < regionSize; z++) {
-            for (int x = 0; x < regionSize; x++) {
-                if (zones[z][x] != mountainKind) continue;
-                int dx = x - centre, dz = z - centre;
-                int d = dx * dx + dz * dz;
-                if (d < bestDistSq) {
-                    bestDistSq = d;
-                    seedX256 = x;
-                    seedZ256 = z;
-                }
-            }
-        }
-        if (seedX256 < 0) return new byte[regionSize][regionSize];
+        List<int[]> seeds256 = findClusterSeeds(zones, regionSize);
+
+        // Cross-region continuity (scope.md §2, Layer A). The handshake graph
+        // is a pure function of (seed, coord) that both adjacent regions
+        // compute identically for their shared edge — so seeding DLA at
+        // handshake nodes whose own-side is mountain makes both regions
+        // grow ridges toward the exact same boundary points. When the
+        // aggregates meet at the edge, ridges cross seamlessly.
+        HandshakeGraph handshakes = HandshakeLayerImpl.compute(seed, coord, regionSize);
+        List<int[]> handshakeSeeds = mountainHandshakeSeeds(handshakes, regionSize);
+        seeds256.addAll(handshakeSeeds);
+
+        if (seeds256.isEmpty()) return new byte[regionSize][regionSize];
 
         Random random = new Random(chunkSeed);
         int firstSize = PYRAMID_SIZES[0];
-        int seedX = (seedX256 * firstSize) / regionSize;
-        int seedZ = (seedZ256 * firstSize) / regionSize;
-
         boolean[][] frozen = new boolean[firstSize][firstSize];
         int[][] parent = new int[firstSize][firstSize];
         for (int[] row : parent) Arrays.fill(row, -1);
-        frozen[seedZ][seedX] = true;
+        for (int[] s : seeds256) {
+            int sx = (s[0] * firstSize) / regionSize;
+            int sz = (s[1] * firstSize) / regionSize;
+            frozen[sz][sx] = true; // duplicate seeds collapse harmlessly
+        }
 
         for (int level = 0; level < PYRAMID_SIZES.length; level++) {
             int size = PYRAMID_SIZES[level];
@@ -229,8 +247,10 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
                 parent = newParent;
             }
 
-            int anchorX = (seedX * size) / firstSize;
-            int anchorZ = (seedZ * size) / firstSize;
+            // Anchor = grid centre, since multiple clusters may be anywhere.
+            // Kill radius of 2×size covers the full grid plus margin, so all
+            // clusters are reachable from any walker spawn.
+            int anchorX = size / 2, anchorZ = size / 2;
             int walkers = (size * size) / WALKER_DENSITY_DIVISOR;
             // Walkers spawn outside the grid and need to random-walk in to
             // find the aggregate. Expected steps to traverse D cells is O(D²).
@@ -241,13 +261,24 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
             runDla(frozen, parent, size, walkers, maxSteps, anchorX, anchorZ, random);
         }
 
-        // frozen is now at the final pyramid size == regionSize.
+        // frozen is now at the final pyramid size == regionSize. The outer
+        // BORDER_CLEAR ring is forced to zero EXCEPT within a small radius
+        // around handshake mountain seed positions. The clear kills the
+        // boundary-hug artifact (seeds quantising to x=0, walkers entering
+        // and sticking on the first interior cell). The per-handshake
+        // preserve patches keep the exact cells where scope §2 Layer A
+        // sanctions a cross-region ridge crossing — without them we'd also
+        // erase the very aggregate both sides agreed on.
+        boolean[][] preserve = preserveMaskAroundHandshakes(handshakeSeeds, regionSize);
         boolean fullMode = strip.x0() == 0 && strip.z0() == 0
                         && strip.width() == regionSize && strip.height() == regionSize;
         byte[][] mask = new byte[regionSize][regionSize];
         for (int z = 0; z < regionSize; z++) {
             for (int x = 0; x < regionSize; x++) {
                 if (!frozen[z][x]) continue;
+                boolean inBorderRing = x < BORDER_CLEAR || x >= regionSize - BORDER_CLEAR
+                                    || z < BORDER_CLEAR || z >= regionSize - BORDER_CLEAR;
+                if (inBorderRing && !preserve[z][x]) continue;
                 if (fullMode || strip.contains(x, z)) {
                     mask[z][x] = 1;
                 }
@@ -257,15 +288,137 @@ public final class RidgeDlaLayer implements BorderAwareLayer {
     }
 
     /**
+     * Radius (in cells) around a handshake seed that stays unclipped by the
+     * border-clear pass. Picked to exceed {@link #BORDER_CLEAR} so the
+     * preserved patch actually extends through the ring.
+     */
+    private static final int HANDSHAKE_PRESERVE_RADIUS = 6;
+
+    /**
+     * Handshake nodes whose own-region side is a mountain zone become extra
+     * DLA seeds placed on the region edge. Since both neighbouring regions
+     * compute identical handshake nodes from shared inputs (scope §2, Layer
+     * A), the two sides seed at the same world coordinate and grow ridges
+     * that meet at the boundary.
+     */
+    private static List<int[]> mountainHandshakeSeeds(HandshakeGraph graph, int size) {
+        int mountainKind = ZoneKind.MOUNTAINS.ordinal();
+        List<int[]> out = new ArrayList<>();
+        for (HandshakeNode n : graph.nodes()) {
+            // "Own" side depends on which edge this node is on. In
+            // HandshakeLayerImpl, upper is +normal and lower is -normal; for
+            // the NORTH (z=0) and WEST (x=0) edges the own region lives on
+            // the +normal side, for SOUTH/EAST on the -normal side.
+            int ownKind = switch (n.edge()) {
+                case NORTH, WEST -> n.kindUpper();
+                case SOUTH, EAST -> n.kindLower();
+            };
+            if (ownKind != mountainKind) continue;
+
+            int along = Math.min(size - 1, Math.max(0, (int) (n.t() * size)));
+            int x, z;
+            switch (n.edge()) {
+                case NORTH -> { x = along;      z = 0;          }
+                case SOUTH -> { x = along;      z = size - 1;   }
+                case WEST  -> { x = 0;          z = along;      }
+                case EAST  -> { x = size - 1;   z = along;      }
+                default    -> { continue; }
+            }
+            out.add(new int[] { x, z });
+        }
+        return out;
+    }
+
+    /**
+     * Build a boolean mask marking cells within {@link #HANDSHAKE_PRESERVE_RADIUS}
+     * (Chebyshev) of any handshake seed. Used to exempt those cells from
+     * the outer-ring border clear — otherwise we'd zero the very aggregate
+     * both sides of the boundary agreed on.
+     */
+    private static boolean[][] preserveMaskAroundHandshakes(List<int[]> handshakeSeeds, int size) {
+        boolean[][] preserve = new boolean[size][size];
+        int r = HANDSHAKE_PRESERVE_RADIUS;
+        for (int[] s : handshakeSeeds) {
+            int hx = s[0], hz = s[1];
+            int z0 = Math.max(0, hz - r), z1 = Math.min(size - 1, hz + r);
+            int x0 = Math.max(0, hx - r), x1 = Math.min(size - 1, hx + r);
+            for (int z = z0; z <= z1; z++) {
+                for (int x = x0; x <= x1; x++) {
+                    preserve[z][x] = true;
+                }
+            }
+        }
+        return preserve;
+    }
+
+    /**
+     * Flood-fill the mountain cells into connected components; return one
+     * seed per component. Each seed is the mountain cell closest to that
+     * component's centroid (so a U- or C-shaped cluster still seeds inside
+     * itself rather than outside). Returns an empty list if the region has
+     * no mountain cells.
+     */
+    private static List<int[]> findClusterSeeds(int[][] zones, int size) {
+        int mountainKind = ZoneKind.MOUNTAINS.ordinal();
+        boolean[][] visited = new boolean[size][size];
+        int[] queueX = new int[size * size];
+        int[] queueZ = new int[size * size];
+        List<int[]> seeds = new ArrayList<>();
+
+        for (int z = 0; z < size; z++) {
+            for (int x = 0; x < size; x++) {
+                if (zones[z][x] != mountainKind || visited[z][x]) continue;
+                int qTail = 0, head = 0;
+                queueX[qTail] = x;
+                queueZ[qTail] = z;
+                qTail++;
+                visited[z][x] = true;
+                long cxSum = 0, czSum = 0;
+                while (head < qTail) {
+                    int cxc = queueX[head], czc = queueZ[head];
+                    head++;
+                    cxSum += cxc;
+                    czSum += czc;
+                    for (int d = 0; d < 4; d++) {
+                        int nx = cxc + DX[d], nz = czc + DZ[d];
+                        if (nx < 0 || nx >= size || nz < 0 || nz >= size) continue;
+                        if (zones[nz][nx] != mountainKind || visited[nz][nx]) continue;
+                        visited[nz][nx] = true;
+                        queueX[qTail] = nx;
+                        queueZ[qTail] = nz;
+                        qTail++;
+                    }
+                }
+                int cxAvg = (int) (cxSum / qTail);
+                int czAvg = (int) (czSum / qTail);
+                int bestX = queueX[0], bestZ = queueZ[0];
+                int bestD = Integer.MAX_VALUE;
+                for (int i = 0; i < qTail; i++) {
+                    int dx = queueX[i] - cxAvg, dz = queueZ[i] - czAvg;
+                    int d = dx * dx + dz * dz;
+                    if (d < bestD) {
+                        bestD = d;
+                        bestX = queueX[i];
+                        bestZ = queueZ[i];
+                    }
+                }
+                seeds.add(new int[] { bestX, bestZ });
+            }
+        }
+        return seeds;
+    }
+
+    /**
      * Walker pass. Walkers spawn on a square ring OUTSIDE the grid (offset by
      * {@code spawnMargin} beyond the image boundary) and random-walk in.
      * Walking is unclamped — walkers may cross the image edge freely in both
-     * directions, so they can leave and drift back in. Spawning outside the
-     * grid is what prevents the boundary-clutter pattern that in-grid-edge
-     * spawning produces: walkers never stick the instant they spawn, because
-     * no cell adjacent to the spawn location is frozen (the frozen cells live
-     * strictly inside the grid). Termination: stick, max-steps, or drift past
-     * the kill radius from the grid centre.
+     * directions, so they can leave and drift back in. Any interior stick is
+     * accepted; boundary cluttering is handled at output time by
+     * {@link #BORDER_CLEAR} rather than by filtering walkers mid-pass (a
+     * per-walker filter would also discard legitimate sticks near seeds that
+     * quantised close to the grid edge, leaving entire clusters un-grown).
+     * Termination: stick, max-steps, or drift past the kill radius from the
+     * anchor.
      */
     private static void runDla(boolean[][] frozen, int[][] parent, int size,
                                int walkerCount, int maxSteps,
