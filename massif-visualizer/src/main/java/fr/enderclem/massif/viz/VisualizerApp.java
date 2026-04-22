@@ -6,6 +6,7 @@ import fr.enderclem.massif.api.MassifFramework;
 import fr.enderclem.massif.api.MassifKeys;
 import fr.enderclem.massif.api.MountainCluster;
 import fr.enderclem.massif.api.MountainClusters;
+import fr.enderclem.massif.api.SpineEdge;
 import fr.enderclem.massif.api.WorldWindow;
 import fr.enderclem.massif.api.ZoneCell;
 import fr.enderclem.massif.api.ZoneField;
@@ -466,22 +467,16 @@ public final class VisualizerApp extends JFrame {
         Map<Integer, ZoneCell> byId = graph.byId();
         for (MountainCluster c : clusters.clusters()) {
             int colour = colourForCluster(c.id());
-            // Spine polyline: one segment per consecutive pair of spine cells.
-            // For L-shaped or curved clusters the line bends with the shape.
-            List<Integer> spine = c.spineCellIds();
-            if (spine.size() > 1) {
-                g2.setColor(new Color(colour));
-                ZoneCell prev = byId.get(spine.get(0));
-                int px = toPixel(prev.seedX(), w.x0());
-                int pz = toPixel(prev.seedZ(), w.z0());
-                for (int i = 1; i < spine.size(); i++) {
-                    ZoneCell curr = byId.get(spine.get(i));
-                    int nx = toPixel(curr.seedX(), w.x0());
-                    int nz = toPixel(curr.seedZ(), w.z0());
-                    g2.drawLine(px, pz, nx, nz);
-                    px = nx;
-                    pz = nz;
-                }
+            // Spine tree: one segment per tree edge. Y / branching clusters
+            // get all their arms rendered from their junction outward.
+            g2.setColor(new Color(colour));
+            for (SpineEdge edge : c.spineEdges()) {
+                ZoneCell a = byId.get(edge.fromCellId());
+                ZoneCell b = byId.get(edge.toCellId());
+                if (a == null || b == null) continue;
+                g2.drawLine(
+                    toPixel(a.seedX(), w.x0()), toPixel(a.seedZ(), w.z0()),
+                    toPixel(b.seedX(), w.x0()), toPixel(b.seedZ(), w.z0()));
             }
             int cx = toPixel(c.representativeX(), w.x0());
             int cz = toPixel(c.representativeZ(), w.z0());

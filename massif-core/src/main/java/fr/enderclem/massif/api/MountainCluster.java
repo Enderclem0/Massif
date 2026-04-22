@@ -11,17 +11,21 @@ import java.util.List;
  * ids arrive when Phase 4b computes clusters over a globally-enumerable
  * zone graph.
  *
- * <p>{@code spineCellIds} is an ordered polyline through the cluster: the
- * graph-diameter path — the path through cluster cells connecting the two
- * cells that are farthest apart in hops, recovered via the standard
- * two-BFS diameter heuristic. A straight PCA major axis worked badly for
- * L-shaped or curved clusters; a polyline spine follows the shape.
+ * <p>{@code spineEdges} form a spanning tree over the cluster's cells:
+ * every cell is touched and there are exactly {@code cellIds.size() - 1}
+ * edges (0 for a single-cell cluster). Using a tree instead of a single
+ * polyline path means Y-shaped or branching clusters are fully
+ * represented — all three arms of a Y radiate from the junction as
+ * separate edges rather than two arms being collapsed into a single
+ * diameter and the third disappearing.
  *
- * <p>{@code representativeX/Z} is the position of the middle cell of
- * {@code spineCellIds}, so it's always inside the cluster even when the
- * geometric centroid of cell positions wouldn't be (C-shapes, rings,
- * U-shapes). Consumers that want "a representative point to anchor a
- * label or marker" should use this.
+ * <p>{@code representativeCellId} is the tree centre — the cell with
+ * minimum eccentricity within the cluster — and
+ * {@code representativeX/Z} its world position. For Y clusters this is
+ * the junction; for linear clusters it's the middle cell; for curved
+ * clusters it's the bend. Always inside the cluster, which fixes the
+ * "centroid outside the cluster" quirk that point-cloud centroids had on
+ * C / U / ring shapes.
  *
  * <p>{@code technique} is an opaque string naming the generation strategy
  * the structural plan selected — a placeholder for now; Phase 6 wires it
@@ -30,7 +34,8 @@ import java.util.List;
 public record MountainCluster(
     int id,
     List<Integer> cellIds,
-    List<Integer> spineCellIds,
+    List<SpineEdge> spineEdges,
+    int representativeCellId,
     double representativeX,
     double representativeZ,
     int peakCountHint,
@@ -38,9 +43,9 @@ public record MountainCluster(
 ) {
     public MountainCluster {
         cellIds = List.copyOf(cellIds);
-        spineCellIds = List.copyOf(spineCellIds);
-        if (spineCellIds.isEmpty()) {
-            throw new IllegalArgumentException("spineCellIds must be non-empty");
+        spineEdges = List.copyOf(spineEdges);
+        if (cellIds.isEmpty()) {
+            throw new IllegalArgumentException("cellIds must be non-empty");
         }
     }
 }
