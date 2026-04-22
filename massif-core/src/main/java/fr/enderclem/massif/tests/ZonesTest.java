@@ -8,6 +8,7 @@ import fr.enderclem.massif.api.MassifKeys;
 import fr.enderclem.massif.api.ZoneCell;
 import fr.enderclem.massif.api.ZoneField;
 import fr.enderclem.massif.api.ZoneGraph;
+import fr.enderclem.massif.api.ZoneSeedPool;
 import fr.enderclem.massif.api.ZoneType;
 import fr.enderclem.massif.api.ZoneTypeRegistry;
 import fr.enderclem.massif.blackboard.Blackboard;
@@ -35,6 +36,8 @@ public final class ZonesTest {
             borderPairingMatchesField();
             zoneGraphCellsNonEmpty();
             zoneGraphAdjacencyIsSymmetric();
+            jitteredPoolIsUnbounded();
+            relaxedPoolIsBounded();
             System.out.println("  ZonesTest: OK");
             return 0;
         } catch (Throwable t) {
@@ -144,6 +147,25 @@ public final class ZonesTest {
             TestAssert.assertTrue(c.type() >= 0 && c.type() < r.size(),
                 "cell type " + c.type() + " out of registry range");
         }
+    }
+
+    private static void jitteredPoolIsUnbounded() {
+        // 0 iterations → JitteredZoneSeedPool, which enumerates on demand.
+        Blackboard.Sealed board = Massif.framework(ZoneTypeRegistry.defaultRegistry(), 0)
+            .generate(1234L);
+        ZoneSeedPool pool = board.get(MassifKeys.ZONE_SEED_POOL);
+        TestAssert.assertEquals(0, pool.allSeeds().length,
+            "jittered pool should have empty allSeeds (unbounded)");
+        TestAssert.assertTrue(pool.seedsNear(0, 0).length > 0,
+            "jittered pool seedsNear should still return a neighbourhood");
+    }
+
+    private static void relaxedPoolIsBounded() {
+        Blackboard.Sealed board = Massif.framework(ZoneTypeRegistry.defaultRegistry(), 3)
+            .generate(1234L);
+        ZoneSeedPool pool = board.get(MassifKeys.ZONE_SEED_POOL);
+        TestAssert.assertTrue(pool.allSeeds().length > 0,
+            "relaxed pool should expose its full seed list via allSeeds");
     }
 
     private static void zoneGraphAdjacencyIsSymmetric() {

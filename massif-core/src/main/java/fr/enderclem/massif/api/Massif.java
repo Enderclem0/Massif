@@ -5,6 +5,7 @@ import fr.enderclem.massif.stages.zones.BorderFieldProducer;
 import fr.enderclem.massif.stages.zones.ZoneFieldProducer;
 import fr.enderclem.massif.stages.zones.ZoneGraphProducer;
 import fr.enderclem.massif.stages.zones.ZoneRegistryProducer;
+import fr.enderclem.massif.stages.zones.ZoneSeedPoolProducer;
 
 /**
  * Public factory for consumers that just want a ready-to-run framework.
@@ -13,26 +14,39 @@ import fr.enderclem.massif.stages.zones.ZoneRegistryProducer;
  */
 public final class Massif {
 
+    /** Lloyd iterations applied to the default framework's seed pool. */
+    public static final int DEFAULT_LLOYD_ITERATIONS = 3;
+
     private Massif() {}
 
     /**
-     * A framework wired with every producer the current rebuild phase has
-     * implemented. Uses {@link ZoneTypeRegistry#defaultRegistry()} for zone
-     * types; call {@link #framework(ZoneTypeRegistry)} to supply a custom
-     * registry.
+     * Framework with the default {@link ZoneTypeRegistry} and
+     * {@link #DEFAULT_LLOYD_ITERATIONS} iterations of Lloyd relaxation on
+     * the zone seed pool.
      */
     public static MassifFramework defaultFramework() {
-        return framework(ZoneTypeRegistry.defaultRegistry());
+        return framework(ZoneTypeRegistry.defaultRegistry(), DEFAULT_LLOYD_ITERATIONS);
     }
 
     /**
-     * Framework with the given {@code registry}. Wires the Phase 3 producers:
-     * registry publication, Voronoi zone field, and the Phase 2 demo
-     * heightmap (kept until Layer 4 composition lands).
+     * Framework with the given registry and zero Lloyd iterations (seed pool
+     * is the jittered on-demand one — original Phase 3 behaviour).
      */
     public static MassifFramework framework(ZoneTypeRegistry registry) {
+        return framework(registry, 0);
+    }
+
+    /**
+     * Framework wired with every Phase-3 producer: registry publication,
+     * the chosen seed pool (jittered if {@code lloydIterations == 0},
+     * Lloyd-relaxed otherwise), zone field, border field, zone graph, and
+     * the walking-skeleton demo heightmap.
+     */
+    public static MassifFramework framework(ZoneTypeRegistry registry, int lloydIterations) {
         return MassifFramework.of(
             new ZoneRegistryProducer(registry),
+            new ZoneSeedPoolProducer(
+                ZoneFieldProducer.DEFAULT_CELL_SIZE, lloydIterations, MassifKeys.VIEW_SIZE),
             new ZoneFieldProducer(),
             new BorderFieldProducer(),
             new ZoneGraphProducer(),

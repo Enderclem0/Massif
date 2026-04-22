@@ -32,6 +32,15 @@ public final class MassifKeys {
         FeatureKey.of("core:zone_registry", ZoneTypeRegistry.class);
 
     /**
+     * Voronoi seed source consulted by the zone field, border field, and
+     * graph producers. Publishing a single pool means the Lloyd-vs-jittered
+     * decision is made in one place instead of repeated across every
+     * downstream zone producer.
+     */
+    public static final FeatureKey<ZoneSeedPool> ZONE_SEED_POOL =
+        FeatureKey.of("core:zone_seed_pool", ZoneSeedPool.class);
+
+    /**
      * Queryable zone classification: at any world coordinate returns the
      * integer id of the zone type covering it. Ids are defined by
      * {@link #ZONE_REGISTRY}.

@@ -2,28 +2,18 @@ package fr.enderclem.massif.stages.zones;
 
 import fr.enderclem.massif.api.BorderField;
 import fr.enderclem.massif.api.MassifKeys;
-import fr.enderclem.massif.api.ZoneTypeRegistry;
+import fr.enderclem.massif.api.ZoneSeedPool;
 import fr.enderclem.massif.blackboard.FeatureKey;
 import fr.enderclem.massif.pipeline.ExecutionContext;
 import fr.enderclem.massif.pipeline.Producer;
 import java.util.Set;
 
 /**
- * Publishes a Voronoi-backed {@link BorderField} under
- * {@link MassifKeys#BORDER_FIELD}. Cell size matches {@link ZoneFieldProducer}
- * so both fields resolve against the same underlying seed lattice.
+ * Wraps {@link MassifKeys#ZONE_SEED_POOL} in a queryable {@link BorderField}.
  */
 public final class BorderFieldProducer implements Producer {
 
-    private final int cellSize;
-
-    public BorderFieldProducer() {
-        this(ZoneFieldProducer.DEFAULT_CELL_SIZE);
-    }
-
-    public BorderFieldProducer(int cellSize) {
-        this.cellSize = cellSize;
-    }
+    public BorderFieldProducer() {}
 
     @Override
     public String name() {
@@ -37,13 +27,13 @@ public final class BorderFieldProducer implements Producer {
 
     @Override
     public Set<FeatureKey<?>> reads() {
-        return Set.of(MassifKeys.ZONE_REGISTRY);
+        return Set.of(MassifKeys.ZONE_SEED_POOL);
     }
 
     @Override
     public void compute(ExecutionContext ctx) {
-        ZoneTypeRegistry registry = ctx.read(MassifKeys.ZONE_REGISTRY);
-        BorderField field = new VoronoiBorderField(ctx.seed(), registry.size(), cellSize);
+        ZoneSeedPool pool = ctx.read(MassifKeys.ZONE_SEED_POOL);
+        BorderField field = new VoronoiBorderField(pool);
         ctx.write(MassifKeys.BORDER_FIELD, field);
     }
 }

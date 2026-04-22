@@ -1,5 +1,6 @@
 package fr.enderclem.massif.stages.zones;
 
+import fr.enderclem.massif.api.ZoneSeed;
 import fr.enderclem.massif.primitives.RegionCoord;
 
 /**
