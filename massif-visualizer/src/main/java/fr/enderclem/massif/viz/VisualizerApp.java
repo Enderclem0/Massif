@@ -13,10 +13,21 @@ import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
+import javax.swing.DefaultComboBoxModel;
 import javax.swing.JButton;
+import javax.swing.JComboBox;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
+import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
@@ -41,13 +52,19 @@ import javax.swing.SwingUtilities;
 public final class VisualizerApp extends JFrame {
 
     private static final int RENDER_SIZE = MassifKeys.DEMO_SIZE;
+    private static final Path SEEDS_FILE = Paths.get(
+        System.getProperty("user.home"), ".massif", "seeds.tsv");
 
     private final MassifFramework framework = Massif.defaultFramework();
 
     private final JTextField seedField = new JTextField("1234", 16);
+    private final JComboBox<SavedSeed> savedCombo = new JComboBox<>();
     private final JLabel statusLabel = new JLabel(" ");
     private final JTextArea keyListing = new JTextArea();
     private final RenderPanel canvas = new RenderPanel();
+
+    /** Suppresses combobox actionPerformed during programmatic reloads. */
+    private boolean loadingCombo = false;
 
     private VisualizerApp() {
         super("Massif — Phase 2 walking skeleton");
@@ -62,6 +79,31 @@ public final class VisualizerApp extends JFrame {
         JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT));
         controls.add(new JLabel("Seed:"));
         controls.add(seedField);
+
+        JButton randomBtn = new JButton("Randomize");
+        randomBtn.setToolTipText("Fill the seed with a random long and regenerate");
+        randomBtn.addActionListener(e -> {
+            seedField.setText(Long.toString(ThreadLocalRandom.current().nextLong()));
+            regenerate();
+        });
+        controls.add(randomBtn);
+
+        JButton saveBtn = new JButton("Save");
+        saveBtn.setToolTipText("Save the current seed to " + SEEDS_FILE);
+        saveBtn.addActionListener(e -> promptAndSave());
+        controls.add(saveBtn);
+
+        controls.add(new JLabel("Saved:"));
+        savedCombo.setPrototypeDisplayValue(new SavedSeed("wwwwwwwwwwwwwwww", 0L));
+        savedCombo.addActionListener(e -> {
+            if (loadingCombo) return;
+            SavedSeed s = (SavedSeed) savedCombo.getSelectedItem();
+            if (s == null) return;
+            seedField.setText(Long.toString(s.seed()));
+            regenerate();
+        });
+        controls.add(savedCombo);
+
         JButton go = new JButton("Generate");
         go.addActionListener(e -> regenerate());
         controls.add(go);
@@ -70,6 +112,8 @@ public final class VisualizerApp extends JFrame {
         keyListing.setEditable(false);
         keyListing.setRows(6);
         keyListing.setFont(new java.awt.Font("Monospaced", java.awt.Font.PLAIN, 12));
+
+        reloadSavedCombo();
 
         JPanel south = new JPanel(new BorderLayout());
         south.add(statusLabel, BorderLayout.NORTH);
@@ -113,6 +157,79 @@ public final class VisualizerApp extends JFrame {
               .append('\n');
         }
         return sb.toString();
+    }
+
+    // ------------------------------------------------------------------
+    //  Saved-seed persistence
+    // ------------------------------------------------------------------
+
+    /** One line per entry in {@link #SEEDS_FILE}, format {@code label\tseed}. */
+    private record SavedSeed(String label, long seed) {
+        @Override public String toString() { return label + "  (" + seed + ")"; }
+    }
+
+    private void promptAndSave() {
+        long seed;
+        try {
+            seed = Long.parseLong(seedField.getText().trim());
+        } catch (NumberFormatException ex) {
+            statusLabel.setText("Seed must be a long integer");
+            return;
+        }
+        String input = JOptionPane.showInputDialog(this,
+            "Label for seed " + seed + ":", Long.toString(seed));
+        if (input == null) return; // cancelled
+        String label = input.isBlank() ? Long.toString(seed) : input.trim();
+        try {
+            persistSeed(new SavedSeed(label, seed));
+            reloadSavedCombo();
+            statusLabel.setText("Saved '" + label + "' → " + SEEDS_FILE);
+        } catch (IOException ex) {
+            statusLabel.setText("Save failed: " + ex.getMessage());
+        }
+    }
+
+    private static void persistSeed(SavedSeed entry) throws IOException {
+        Files.createDirectories(SEEDS_FILE.getParent());
+        // Tabs and newlines in the label would break the file format; strip them.
+        String safeLabel = entry.label().replace('\t', ' ').replace('\n', ' ');
+        String line = safeLabel + '\t' + entry.seed() + System.lineSeparator();
+        Files.writeString(SEEDS_FILE, line, StandardCharsets.UTF_8,
+            StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+    }
+
+    private void reloadSavedCombo() {
+        List<SavedSeed> entries = readSeeds();
+        DefaultComboBoxModel<SavedSeed> model = new DefaultComboBoxModel<>();
+        for (SavedSeed e : entries) model.addElement(e);
+        loadingCombo = true;
+        try {
+            savedCombo.setModel(model);
+            savedCombo.setSelectedIndex(-1); // no entry is "current"
+        } finally {
+            loadingCombo = false;
+        }
+    }
+
+    private static List<SavedSeed> readSeeds() {
+        List<SavedSeed> out = new ArrayList<>();
+        if (!Files.isRegularFile(SEEDS_FILE)) return out;
+        try {
+            for (String line : Files.readAllLines(SEEDS_FILE, StandardCharsets.UTF_8)) {
+                if (line.isBlank()) continue;
+                int tab = line.indexOf('\t');
+                if (tab <= 0 || tab == line.length() - 1) continue;
+                try {
+                    long seed = Long.parseLong(line.substring(tab + 1).trim());
+                    out.add(new SavedSeed(line.substring(0, tab), seed));
+                } catch (NumberFormatException ignored) {
+                    // skip malformed line
+                }
+            }
+        } catch (IOException ignored) {
+            // unreadable file → empty list; status line surfaces nothing, not fatal
+        }
+        return out;
     }
 
     public static void main(String[] args) {
