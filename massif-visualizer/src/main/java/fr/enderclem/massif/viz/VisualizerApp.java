@@ -463,21 +463,28 @@ public final class VisualizerApp extends JFrame {
         Graphics2D g2 = img.createGraphics();
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         g2.setStroke(new BasicStroke(2.0f));
+        Map<Integer, ZoneCell> byId = graph.byId();
         for (MountainCluster c : clusters.clusters()) {
             int colour = colourForCluster(c.id());
-            int cx = toPixel(c.centroidX(), w.x0());
-            int cz = toPixel(c.centroidZ(), w.z0());
-            if (c.semiMajorAxisLength() > 0.0) {
-                double cosA = Math.cos(c.orientationAngle());
-                double sinA = Math.sin(c.orientationAngle());
-                double sm = c.semiMajorAxisLength();
-                int sx = toPixel(c.centroidX() - cosA * sm, w.x0());
-                int sz = toPixel(c.centroidZ() - sinA * sm, w.z0());
-                int ex = toPixel(c.centroidX() + cosA * sm, w.x0());
-                int ez = toPixel(c.centroidZ() + sinA * sm, w.z0());
+            // Spine polyline: one segment per consecutive pair of spine cells.
+            // For L-shaped or curved clusters the line bends with the shape.
+            List<Integer> spine = c.spineCellIds();
+            if (spine.size() > 1) {
                 g2.setColor(new Color(colour));
-                g2.drawLine(sx, sz, ex, ez);
+                ZoneCell prev = byId.get(spine.get(0));
+                int px = toPixel(prev.seedX(), w.x0());
+                int pz = toPixel(prev.seedZ(), w.z0());
+                for (int i = 1; i < spine.size(); i++) {
+                    ZoneCell curr = byId.get(spine.get(i));
+                    int nx = toPixel(curr.seedX(), w.x0());
+                    int nz = toPixel(curr.seedZ(), w.z0());
+                    g2.drawLine(px, pz, nx, nz);
+                    px = nx;
+                    pz = nz;
+                }
             }
+            int cx = toPixel(c.representativeX(), w.x0());
+            int cz = toPixel(c.representativeZ(), w.z0());
             g2.setColor(new Color(colour));
             g2.fillOval(cx - 5, cz - 5, 10, 10);
             g2.setColor(Color.BLACK);

@@ -11,7 +11,9 @@ import fr.enderclem.massif.pipeline.ExecutionContext;
 import fr.enderclem.massif.pipeline.Producer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -19,14 +21,16 @@ import java.util.Set;
 
 /**
  * Flood-fills the zone graph over the "mountain" zone type to produce a
- * {@link MountainCluster} per connected component. Derives centroid,
- * major-axis orientation via 2D PCA, the semi-major extent, and a
- * peak-count hint from each component's cell list.
+ * {@link MountainCluster} per connected component. Each cluster carries a
+ * polyline spine — the graph-diameter path between the two farthest-apart
+ * cells — recovered via the standard two-BFS diameter heuristic so L-shape
+ * or curved clusters get a bent spine instead of a straight PCA axis. The
+ * representative point is the middle cell of the spine, guaranteed inside
+ * the cluster even for C / U / ring shapes.
  *
  * <p>The zone-type name looked up is {@value #MOUNTAIN_ZONE_NAME}; worlds
- * using a custom registry that doesn't declare a mountain type produce an
- * empty {@link MountainClusters} (this isn't an error — it just means the
- * world has no mountain Voronoi cells).
+ * using a custom registry without it produce an empty
+ * {@link MountainClusters}.
  */
 public final class MountainClusterProducer implements Producer {
 
@@ -75,7 +79,6 @@ public final class MountainClusterProducer implements Producer {
 
         for (ZoneCell cell : graph.cells()) {
             if (cell.type() != mountainType || visited.contains(cell.id())) continue;
-
             List<Integer> componentIds = floodFillComponent(byId, cell.id(), mountainType, visited);
             clusters.add(buildCluster(byId, componentIds));
         }
@@ -115,50 +118,70 @@ public final class MountainClusterProducer implements Producer {
     }
 
     private MountainCluster buildCluster(Map<Integer, ZoneCell> byId, List<Integer> componentIds) {
-        int n = componentIds.size();
-        double cx = 0.0;
-        double cz = 0.0;
+        Set<Integer> members = new HashSet<>(componentIds);
         int minId = Integer.MAX_VALUE;
-        for (int cid : componentIds) {
-            ZoneCell c = byId.get(cid);
-            cx += c.seedX();
-            cz += c.seedZ();
-            if (cid < minId) minId = cid;
-        }
-        cx /= n;
-        cz /= n;
+        for (int cid : componentIds) if (cid < minId) minId = cid;
 
-        // 2D covariance on centred cell positions. Not divided by n — atan2
-        // below is scale-invariant, so the division is wasted work.
-        double mxx = 0.0;
-        double mzz = 0.0;
-        double mxz = 0.0;
-        for (int cid : componentIds) {
-            ZoneCell c = byId.get(cid);
-            double dx = c.seedX() - cx;
-            double dz = c.seedZ() - cz;
-            mxx += dx * dx;
-            mzz += dz * dz;
-            mxz += dx * dz;
-        }
+        // Two-BFS diameter: pick any cell, BFS to the farthest, BFS from
+        // that one to get the true diameter endpoints. The path between
+        // them (via parent pointers from the second BFS) is the spine.
+        int anchor = componentIds.get(0);
+        int end1 = bfsFarthest(byId, members, anchor).farthest();
+        BfsResult fromEnd1 = bfsFarthest(byId, members, end1);
+        int end2 = fromEnd1.farthest();
+        List<Integer> spine = reconstructPath(fromEnd1.parents(), end1, end2);
 
-        double angle = (mxx == 0.0 && mzz == 0.0 && mxz == 0.0)
-            ? 0.0
-            : 0.5 * Math.atan2(2.0 * mxz, mxx - mzz);
+        int midIdx = spine.size() / 2;
+        ZoneCell midCell = byId.get(spine.get(midIdx));
+        int peakHint = Math.max(1, componentIds.size() / CELLS_PER_PEAK);
 
-        double cosA = Math.cos(angle);
-        double sinA = Math.sin(angle);
-        double semiMajor = 0.0;
-        for (int cid : componentIds) {
-            ZoneCell c = byId.get(cid);
-            double dx = c.seedX() - cx;
-            double dz = c.seedZ() - cz;
-            double proj = Math.abs(dx * cosA + dz * sinA);
-            if (proj > semiMajor) semiMajor = proj;
-        }
-
-        int peakHint = Math.max(1, n / CELLS_PER_PEAK);
         return new MountainCluster(
-            minId, componentIds, cx, cz, angle, semiMajor, peakHint, defaultTechnique);
+            minId, componentIds, spine,
+            midCell.seedX(), midCell.seedZ(),
+            peakHint, defaultTechnique);
+    }
+
+    private record BfsResult(int farthest, Map<Integer, Integer> parents) {}
+
+    private static BfsResult bfsFarthest(Map<Integer, ZoneCell> byId,
+                                         Set<Integer> members,
+                                         int source) {
+        Map<Integer, Integer> parent = new HashMap<>();
+        parent.put(source, -1);
+        Map<Integer, Integer> dist = new HashMap<>();
+        dist.put(source, 0);
+        Deque<Integer> q = new ArrayDeque<>();
+        q.add(source);
+        int farthest = source;
+        int maxDist = 0;
+        while (!q.isEmpty()) {
+            int cur = q.pollFirst();
+            int d = dist.get(cur);
+            if (d > maxDist) { maxDist = d; farthest = cur; }
+            ZoneCell c = byId.get(cur);
+            if (c == null) continue;
+            for (int nid : c.neighbourIds()) {
+                if (!members.contains(nid) || parent.containsKey(nid)) continue;
+                parent.put(nid, cur);
+                dist.put(nid, d + 1);
+                q.addLast(nid);
+            }
+        }
+        return new BfsResult(farthest, parent);
+    }
+
+    private static List<Integer> reconstructPath(Map<Integer, Integer> parent, int from, int to) {
+        List<Integer> path = new ArrayList<>();
+        int cur = to;
+        while (cur != -1) {
+            path.add(cur);
+            Integer p = parent.get(cur);
+            if (p == null) break; // defensive — shouldn't happen for well-formed graph
+            cur = p;
+        }
+        // Path is currently to → from; the spine ordering is irrelevant to
+        // correctness but reversing it so it runs from → to is conventional.
+        Collections.reverse(path);
+        return path;
     }
 }

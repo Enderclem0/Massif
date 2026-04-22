@@ -8,6 +8,7 @@ import fr.enderclem.massif.api.ZoneCell;
 import fr.enderclem.massif.api.ZoneGraph;
 import fr.enderclem.massif.blackboard.Blackboard;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -27,7 +28,9 @@ public final class FeaturesTest {
             clusterCellsAreGraphCells();
             componentsArePartition();
             componentsAreConnected();
-            orientationInValidRange();
+            spineCellsAreClusterMembers();
+            spineIsConnectedPath();
+            representativePointIsOnSpine();
             System.out.println("  FeaturesTest: OK");
             return 0;
         } catch (Throwable t) {
@@ -107,14 +110,49 @@ public final class FeaturesTest {
         }
     }
 
-    private static void orientationInValidRange() {
+    private static void spineCellsAreClusterMembers() {
         MountainClusters mc = Massif.defaultFramework().generate(5L).get(MassifKeys.MOUNTAIN_CLUSTERS);
         for (MountainCluster c : mc.clusters()) {
-            double a = c.orientationAngle();
-            TestAssert.assertTrue(a >= -Math.PI / 2 - 1e-6 && a <= Math.PI / 2 + 1e-6,
-                "orientation " + a + " outside [-π/2, π/2]");
-            TestAssert.assertTrue(c.semiMajorAxisLength() >= 0.0,
-                "semiMajorAxisLength negative: " + c.semiMajorAxisLength());
+            Set<Integer> members = new HashSet<>(c.cellIds());
+            for (int sid : c.spineCellIds()) {
+                TestAssert.assertTrue(members.contains(sid),
+                    "spine cell " + sid + " not a member of cluster " + c.id());
+            }
+            TestAssert.assertTrue(!c.spineCellIds().isEmpty(),
+                "cluster " + c.id() + " has empty spine");
+        }
+    }
+
+    private static void spineIsConnectedPath() {
+        Blackboard.Sealed board = Massif.defaultFramework().generate(5L);
+        MountainClusters mc = board.get(MassifKeys.MOUNTAIN_CLUSTERS);
+        Map<Integer, ZoneCell> byId = board.get(MassifKeys.ZONE_GRAPH).byId();
+        for (MountainCluster c : mc.clusters()) {
+            List<Integer> spine = c.spineCellIds();
+            for (int i = 1; i < spine.size(); i++) {
+                int prev = spine.get(i - 1);
+                int cur = spine.get(i);
+                TestAssert.assertTrue(byId.get(prev).neighbourIds().contains(cur),
+                    "spine hop " + prev + " → " + cur + " is not an edge in cluster " + c.id());
+            }
+        }
+    }
+
+    private static void representativePointIsOnSpine() {
+        Blackboard.Sealed board = Massif.defaultFramework().generate(5L);
+        MountainClusters mc = board.get(MassifKeys.MOUNTAIN_CLUSTERS);
+        Map<Integer, ZoneCell> byId = board.get(MassifKeys.ZONE_GRAPH).byId();
+        for (MountainCluster c : mc.clusters()) {
+            boolean matched = false;
+            for (int sid : c.spineCellIds()) {
+                ZoneCell cell = byId.get(sid);
+                if (cell.seedX() == c.representativeX() && cell.seedZ() == c.representativeZ()) {
+                    matched = true;
+                    break;
+                }
+            }
+            TestAssert.assertTrue(matched,
+                "representative point not on spine for cluster " + c.id());
         }
     }
 }
