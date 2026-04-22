@@ -1,9 +1,13 @@
 package fr.enderclem.massif.viz;
 
+import fr.enderclem.massif.api.BorderField;
+import fr.enderclem.massif.api.BorderSample;
 import fr.enderclem.massif.api.Massif;
 import fr.enderclem.massif.api.MassifFramework;
 import fr.enderclem.massif.api.MassifKeys;
+import fr.enderclem.massif.api.ZoneCell;
 import fr.enderclem.massif.api.ZoneField;
+import fr.enderclem.massif.api.ZoneGraph;
 import fr.enderclem.massif.api.ZoneTypeRegistry;
 import fr.enderclem.massif.blackboard.Blackboard;
 import fr.enderclem.massif.blackboard.FeatureKey;
@@ -219,6 +223,21 @@ public final class VisualizerApp extends JFrame {
                     board.get(MassifKeys.ZONE_FIELD),
                     board.get(MassifKeys.ZONE_REGISTRY));
             }
+        },
+        BORDERS("Border distance") {
+            @Override
+            BufferedImage render(Blackboard.Sealed board) {
+                return borderDistanceImage(board.get(MassifKeys.BORDER_FIELD));
+            }
+        },
+        GRAPH("Zone graph") {
+            @Override
+            BufferedImage render(Blackboard.Sealed board) {
+                return zoneGraphImage(
+                    board.get(MassifKeys.ZONE_FIELD),
+                    board.get(MassifKeys.ZONE_REGISTRY),
+                    board.get(MassifKeys.ZONE_GRAPH));
+            }
         };
 
         private final String label;
@@ -266,6 +285,80 @@ public final class VisualizerApp extends JFrame {
                 img.setRGB(x, z, palette[grid[z][x]]);
             }
         }
+        return img;
+    }
+
+    /** Distance to nearest Voronoi border, mapped to grayscale (black = at border). */
+    private static BufferedImage borderDistanceImage(BorderField field) {
+        int size = RENDER_SIZE;
+        int x0 = -size / 2;
+        int z0 = -size / 2;
+        double[][] dist = new double[size][size];
+        double max = 0.0;
+        for (int z = 0; z < size; z++) {
+            for (int x = 0; x < size; x++) {
+                double d = field.sampleAt(x0 + x + 0.5, z0 + z + 0.5).distance();
+                dist[z][x] = d;
+                if (d > max) max = d;
+            }
+        }
+        if (max <= 0.0) max = 1.0; // avoid div-by-zero on degenerate boards
+        BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
+        for (int z = 0; z < size; z++) {
+            for (int x = 0; x < size; x++) {
+                int g = (int) Math.round(255.0 * (dist[z][x] / max));
+                if (g < 0) g = 0; else if (g > 255) g = 255;
+                img.setRGB(x, z, (g << 16) | (g << 8) | g);
+            }
+        }
+        return img;
+    }
+
+    /**
+     * Zone fill + seed dots + adjacency polyline overlay. Seeds outside the
+     * window are drawn too (they live in the halo ring of the graph) so
+     * edges that would otherwise dead-end at the window boundary visibly
+     * continue into the surrounding cells.
+     */
+    private static BufferedImage zoneGraphImage(ZoneField field,
+                                                ZoneTypeRegistry registry,
+                                                ZoneGraph graph) {
+        BufferedImage img = zonesImage(field, registry);
+        Graphics2D g2 = img.createGraphics();
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        int size = RENDER_SIZE;
+        int half = size / 2;
+
+        var byId = graph.byId();
+        // Edges first so seed dots sit on top.
+        g2.setColor(new Color(0, 0, 0, 160));
+        g2.setStroke(new java.awt.BasicStroke(1.2f));
+        for (ZoneCell c : graph.cells()) {
+            int cx = (int) Math.round(c.seedX()) + half;
+            int cz = (int) Math.round(c.seedZ()) + half;
+            for (int nid : c.neighbourIds()) {
+                if (nid <= c.id()) continue; // draw each edge once
+                ZoneCell n = byId.get(nid);
+                if (n == null) continue;
+                int nx = (int) Math.round(n.seedX()) + half;
+                int nz = (int) Math.round(n.seedZ()) + half;
+                g2.drawLine(cx, cz, nx, nz);
+            }
+        }
+        // Seed dots.
+        g2.setColor(Color.WHITE);
+        for (ZoneCell c : graph.cells()) {
+            int cx = (int) Math.round(c.seedX()) + half;
+            int cz = (int) Math.round(c.seedZ()) + half;
+            g2.fillOval(cx - 3, cz - 3, 6, 6);
+        }
+        g2.setColor(Color.BLACK);
+        for (ZoneCell c : graph.cells()) {
+            int cx = (int) Math.round(c.seedX()) + half;
+            int cz = (int) Math.round(c.seedZ()) + half;
+            g2.drawOval(cx - 3, cz - 3, 6, 6);
+        }
+        g2.dispose();
         return img;
     }
 

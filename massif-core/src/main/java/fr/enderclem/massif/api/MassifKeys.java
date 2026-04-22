@@ -38,4 +38,23 @@ public final class MassifKeys {
      */
     public static final FeatureKey<ZoneField> ZONE_FIELD =
         FeatureKey.of("core:zone_field", ZoneField.class);
+
+    /**
+     * Voronoi cells within (and one-region halo around) the current render
+     * window, with adjacency lists. Use this for graph traversals like
+     * "colour neighbouring cells" or "enumerate all mountain cells within
+     * view". For unbounded point queries use {@link #ZONE_FIELD} instead.
+     */
+    public static final FeatureKey<ZoneGraph> ZONE_GRAPH =
+        FeatureKey.of("core:zone_graph", ZoneGraph.class);
+
+    /**
+     * Queryable Voronoi border geometry: distance / normal / zone-type pair
+     * at any world coordinate. Design doc §Transitions lists these as three
+     * separate keys; the current implementation packs them in one
+     * {@link BorderSample} per call because a shared two-nearest-seeds
+     * lookup produces all three.
+     */
+    public static final FeatureKey<BorderField> BORDER_FIELD =
+        FeatureKey.of("core:border_field", BorderField.class);
 }
