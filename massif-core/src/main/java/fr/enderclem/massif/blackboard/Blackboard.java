@@ -6,10 +6,11 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Per-region typed key/value store written by layers during pipeline execution.
- * Write-once: a given {@link FeatureKey} may only be written once per blackboard.
- * Sealed via {@link #seal()} once the pipeline has finished, after which the
- * returned view is immutable and safe to publish.
+ * Shared, typed key/value store populated by producers during generation.
+ * Write-once: a given {@link FeatureKey} may be written at most once per
+ * blackboard instance. Sealed via {@link #seal()} once the pipeline has
+ * finished, after which the returned {@link Sealed} view is immutable and
+ * safe to hand to consumers.
  */
 public final class Blackboard {
 
@@ -21,8 +22,7 @@ public final class Blackboard {
             throw new IllegalStateException("Blackboard is sealed");
         }
         if (store.containsKey(key)) {
-            throw new IllegalStateException(
-                "Feature already written: " + key.name());
+            throw new IllegalStateException("Already written: " + key.name());
         }
         store.put(key, value);
     }
@@ -30,8 +30,7 @@ public final class Blackboard {
     public <T> T get(FeatureKey<T> key) {
         Object value = store.get(key);
         if (value == null) {
-            throw new IllegalStateException(
-                "Feature not present on blackboard: " + key.name());
+            throw new IllegalStateException("Not present on blackboard: " + key.name());
         }
         return key.castValue(value);
     }
@@ -44,24 +43,23 @@ public final class Blackboard {
         return Collections.unmodifiableSet(store.keySet());
     }
 
-    public SealedBlackboard seal() {
+    public Sealed seal() {
         this.sealed = true;
-        return new SealedBlackboard(Map.copyOf(store));
+        return new Sealed(Map.copyOf(store));
     }
 
     /** Immutable snapshot returned after {@link Blackboard#seal()}. */
-    public static final class SealedBlackboard {
+    public static final class Sealed {
         private final Map<FeatureKey<?>, Object> store;
 
-        SealedBlackboard(Map<FeatureKey<?>, Object> store) {
+        Sealed(Map<FeatureKey<?>, Object> store) {
             this.store = store;
         }
 
         public <T> T get(FeatureKey<T> key) {
             Object value = store.get(key);
             if (value == null) {
-                throw new IllegalStateException(
-                    "Feature not present: " + key.name());
+                throw new IllegalStateException("Not present: " + key.name());
             }
             return key.castValue(value);
         }
