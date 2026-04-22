@@ -1,46 +1,44 @@
 package fr.enderclem.massif;
 
+import fr.enderclem.massif.api.Massif;
+import fr.enderclem.massif.api.MassifFramework;
+import fr.enderclem.massif.api.MassifKeys;
 import fr.enderclem.massif.blackboard.Blackboard;
-import fr.enderclem.massif.blackboard.FeatureKey;
 import fr.enderclem.massif.pipeline.Catalog;
-import fr.enderclem.massif.pipeline.ExecutionContext;
-import fr.enderclem.massif.pipeline.MassifFramework;
-import fr.enderclem.massif.pipeline.Producer;
-import java.util.Set;
 
 /**
- * Phase 1 smoke demo: two stub producers wired into the pipeline so the
- * schedule compilation, execution, and blackboard printout all exercise
- * end-to-end. Real producers land in later phases (zones, structural plan,
- * hydrology, techniques, composition).
+ * CLI smoke entry point. Shows the current schedule and generates one
+ * blackboard so the walking-skeleton pipeline runs end to end without
+ * spinning up the visualizer.
  */
 public final class Main {
-
-    private static final FeatureKey<Long> DEMO_SEED = FeatureKey.of("core:demo_seed", Long.class);
-    private static final FeatureKey<String> DEMO_GREETING = FeatureKey.of("core:demo_greeting", String.class);
 
     private Main() {}
 
     public static void main(String[] args) {
-        Producer seedProducer = new Producer() {
-            @Override public String name() { return "demo.seed"; }
-            @Override public Set<FeatureKey<?>> writes() { return Set.of(DEMO_SEED); }
-            @Override public void compute(ExecutionContext ctx) { ctx.write(DEMO_SEED, ctx.seed()); }
-        };
-        Producer greetingProducer = new Producer() {
-            @Override public String name() { return "demo.greeting"; }
-            @Override public Set<FeatureKey<?>> writes() { return Set.of(DEMO_GREETING); }
-            @Override public Set<FeatureKey<?>> reads() { return Set.of(DEMO_SEED); }
-            @Override public void compute(ExecutionContext ctx) {
-                ctx.write(DEMO_GREETING, "Massif phase 1, seed=" + ctx.read(DEMO_SEED));
-            }
-        };
+        long seed = args.length > 0 ? Long.parseLong(args[0]) : 1234L;
 
-        MassifFramework fw = MassifFramework.of(greetingProducer, seedProducer);
+        MassifFramework fw = Massif.defaultFramework();
         System.out.print(Catalog.scheduleListing(fw.schedule()));
 
-        Blackboard.Sealed board = fw.generate(1234L);
+        long t0 = System.nanoTime();
+        Blackboard.Sealed board = fw.generate(seed);
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+
+        System.out.printf("Generated blackboard for seed=%d in %d ms%n", seed, ms);
         System.out.print(Catalog.blackboardListing(board));
-        System.out.println("greeting: " + board.get(DEMO_GREETING));
+
+        float[][] map = board.get(MassifKeys.HEIGHTMAP);
+        float min = Float.POSITIVE_INFINITY, max = Float.NEGATIVE_INFINITY, sum = 0f;
+        int n = map.length * map[0].length;
+        for (float[] row : map) {
+            for (float v : row) {
+                if (v < min) min = v;
+                if (v > max) max = v;
+                sum += v;
+            }
+        }
+        System.out.printf("core:heightmap range=[%.3f, %.3f]  mean=%.3f%n",
+            min, max, sum / n);
     }
 }

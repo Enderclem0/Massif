@@ -1,9 +1,9 @@
 package fr.enderclem.massif.tests;
 
+import fr.enderclem.massif.api.MassifFramework;
 import fr.enderclem.massif.blackboard.Blackboard;
 import fr.enderclem.massif.blackboard.FeatureKey;
 import fr.enderclem.massif.pipeline.ExecutionContext;
-import fr.enderclem.massif.pipeline.MassifFramework;
 import fr.enderclem.massif.pipeline.Producer;
 import fr.enderclem.massif.pipeline.Schedule;
 import java.util.List;

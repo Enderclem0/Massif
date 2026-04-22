@@ -19,14 +19,26 @@ public final class ExecutionContext {
     private final Set<FeatureKey<?>> declaredWrites;
     private final String producerName;
 
-    ExecutionContext(Blackboard blackboard, long seed,
-                     Set<FeatureKey<?>> reads, Set<FeatureKey<?>> writes,
-                     String producerName) {
+    private ExecutionContext(Blackboard blackboard, long seed,
+                             Set<FeatureKey<?>> reads, Set<FeatureKey<?>> writes,
+                             String producerName) {
         this.blackboard = blackboard;
         this.seed = seed;
         this.declaredReads = reads;
         this.declaredWrites = writes;
         this.producerName = producerName;
+    }
+
+    /**
+     * Factory used by {@code MassifFramework} (in the {@code api} package) to
+     * hand a producer its scoped context. Public so the framework entry point
+     * can live outside this package; not intended for direct use by producers.
+     */
+    public static ExecutionContext forProducer(Blackboard blackboard, long seed,
+                                               Set<FeatureKey<?>> reads,
+                                               Set<FeatureKey<?>> writes,
+                                               String producerName) {
+        return new ExecutionContext(blackboard, seed, reads, writes, producerName);
     }
 
     public long seed() {
