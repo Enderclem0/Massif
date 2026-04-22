@@ -1,6 +1,9 @@
 package fr.enderclem.massif.viz;
 
 import fr.enderclem.massif.api.BorderField;
+import fr.enderclem.massif.api.DrainageBasin;
+import fr.enderclem.massif.api.DrainageBasins;
+import fr.enderclem.massif.api.DrainageGraph;
 import fr.enderclem.massif.api.Massif;
 import fr.enderclem.massif.api.MassifFramework;
 import fr.enderclem.massif.api.MassifKeys;
@@ -331,6 +334,19 @@ public final class VisualizerApp extends JFrame {
                                              board.get(MassifKeys.ZONE_GRAPH),
                                              board.get(MassifKeys.MOUNTAIN_CLUSTERS), w);
             }
+        },
+        ELEVATION("Elevation") {
+            @Override BufferedImage render(Blackboard.Sealed board, WorldWindow w) {
+                return elevationImage(board.get(MassifKeys.ZONE_GRAPH),
+                                      board.get(MassifKeys.DRAINAGE_GRAPH), w);
+            }
+        },
+        BASINS("Drainage basins") {
+            @Override BufferedImage render(Blackboard.Sealed board, WorldWindow w) {
+                return basinsImage(board.get(MassifKeys.ZONE_GRAPH),
+                                   board.get(MassifKeys.DRAINAGE_GRAPH),
+                                   board.get(MassifKeys.DRAINAGE_BASINS), w);
+            }
         };
 
         private final String label;
@@ -492,6 +508,135 @@ public final class VisualizerApp extends JFrame {
     /** Convert a world coordinate to the pixel offset within the current window. */
     private static int toPixel(double worldCoord, int windowOrigin) {
         return (int) Math.round(worldCoord - windowOrigin);
+    }
+
+    /**
+     * Each cell painted with its water-level elevation (water-level not
+     * raw elevation — so lakes and oceans appear flat). Linear grayscale
+     * ramp normalised over the window; extremes auto-scale.
+     */
+    private static BufferedImage elevationImage(ZoneGraph graph, DrainageGraph drainage, WorldWindow w) {
+        int size = w.size();
+        ZoneCell[] cells = graph.cells().toArray(new ZoneCell[0]);
+        BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
+
+        double min = Double.POSITIVE_INFINITY, max = Double.NEGATIVE_INFINITY;
+        for (var d : drainage.byCellId().values()) {
+            double v = d.waterLevel();
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+        double range = Math.max(1e-6, max - min);
+
+        for (int z = 0; z < size; z++) {
+            double wz = w.z0() + z + 0.5;
+            for (int x = 0; x < size; x++) {
+                double wx = w.x0() + x + 0.5;
+                ZoneCell nearest = cells[0];
+                double bestDistSq = Double.POSITIVE_INFINITY;
+                for (ZoneCell c : cells) {
+                    double dx = c.seedX() - wx;
+                    double dz = c.seedZ() - wz;
+                    double d = dx * dx + dz * dz;
+                    if (d < bestDistSq) { bestDistSq = d; nearest = c; }
+                }
+                var entry = drainage.byCellId().get(nearest.id());
+                double t = entry == null ? 0.0 : (entry.waterLevel() - min) / range;
+                int g = (int) Math.round(Math.max(0, Math.min(1, t)) * 255);
+                img.setRGB(x, z, (g << 16) | (g << 8) | g);
+            }
+        }
+        return img;
+    }
+
+    /**
+     * Each cell tinted by its basin; lakes overlaid in a translucent blue;
+     * flow-direction arrows drawn from each cell toward its downhill
+     * neighbour; endorheic terminals get a distinct outline.
+     */
+    private static BufferedImage basinsImage(ZoneGraph graph, DrainageGraph drainage,
+                                             DrainageBasins basins, WorldWindow w) {
+        int size = w.size();
+        ZoneCell[] cells = graph.cells().toArray(new ZoneCell[0]);
+        Map<Integer, Integer> cellToBasinColour = new HashMap<>();
+        for (DrainageBasin b : basins.basins()) {
+            int colour = colourForBasin(b);
+            for (int cid : b.memberCellIds()) cellToBasinColour.put(cid, colour);
+        }
+
+        BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
+        for (int z = 0; z < size; z++) {
+            double wz = w.z0() + z + 0.5;
+            for (int x = 0; x < size; x++) {
+                double wx = w.x0() + x + 0.5;
+                ZoneCell nearest = cells[0];
+                double bestDistSq = Double.POSITIVE_INFINITY;
+                for (ZoneCell c : cells) {
+                    double dx = c.seedX() - wx;
+                    double dz = c.seedZ() - wz;
+                    double d = dx * dx + dz * dz;
+                    if (d < bestDistSq) { bestDistSq = d; nearest = c; }
+                }
+                int colour = cellToBasinColour.getOrDefault(nearest.id(), 0x808080);
+                var entry = drainage.byCellId().get(nearest.id());
+                if (entry != null && entry.isLake()) {
+                    colour = blendRgb(colour, 0x2060C0, 0.55f);
+                }
+                img.setRGB(x, z, colour);
+            }
+        }
+
+        Graphics2D g2 = img.createGraphics();
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        Map<Integer, ZoneCell> byId = graph.byId();
+        g2.setStroke(new BasicStroke(1.2f));
+        g2.setColor(new Color(0, 0, 0, 180));
+        for (var entry : drainage.byCellId().values()) {
+            if (entry.downhillCellId() < 0) continue;
+            ZoneCell from = byId.get(entry.cellId());
+            ZoneCell to = byId.get(entry.downhillCellId());
+            if (from == null || to == null) continue;
+            int fx = toPixel(from.seedX(), w.x0());
+            int fz = toPixel(from.seedZ(), w.z0());
+            int tx = toPixel(to.seedX(), w.x0());
+            int tz = toPixel(to.seedZ(), w.z0());
+            g2.drawLine(fx, fz, tx, tz);
+            // Arrow head near the target.
+            double len = Math.hypot(tx - fx, tz - fz);
+            if (len > 4) {
+                double ux = (tx - fx) / len;
+                double uz = (tz - fz) / len;
+                int hx = (int) Math.round(tx - ux * 5);
+                int hz = (int) Math.round(tz - uz * 5);
+                double perpX = -uz;
+                double perpZ = ux;
+                int ax = (int) Math.round(hx + perpX * 3);
+                int az = (int) Math.round(hz + perpZ * 3);
+                int bx = (int) Math.round(hx - perpX * 3);
+                int bz = (int) Math.round(hz - perpZ * 3);
+                g2.drawLine(tx, tz, ax, az);
+                g2.drawLine(tx, tz, bx, bz);
+            }
+        }
+        for (DrainageBasin b : basins.basins()) {
+            ZoneCell outlet = byId.get(b.outletCellId());
+            if (outlet == null) continue;
+            int cx = toPixel(outlet.seedX(), w.x0());
+            int cz = toPixel(outlet.seedZ(), w.z0());
+            g2.setColor(b.endorheic() ? new Color(200, 60, 60) : new Color(30, 120, 220));
+            g2.fillOval(cx - 5, cz - 5, 10, 10);
+            g2.setColor(Color.BLACK);
+            g2.drawOval(cx - 5, cz - 5, 10, 10);
+        }
+        g2.dispose();
+        return img;
+    }
+
+    private static int colourForBasin(DrainageBasin b) {
+        float h = ((b.outletCellId() * 0x9E37) & 0xFFFF) / 65535f;
+        float saturation = b.endorheic() ? 0.45f : 0.6f;
+        float value = b.endorheic() ? 0.75f : 0.9f;
+        return Color.getHSBColor(h, saturation, value).getRGB() & 0xFFFFFF;
     }
 
     private static int colourForCluster(int id) {

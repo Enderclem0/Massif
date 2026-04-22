@@ -19,6 +19,7 @@ public final class TestRunner {
         fails += ScheduleTest.run();
         fails += ZonesTest.run();
         fails += FeaturesTest.run();
+        fails += HydrologyTest.run();
 
         if (fails == 0) {
             System.out.println("All tests passed.");

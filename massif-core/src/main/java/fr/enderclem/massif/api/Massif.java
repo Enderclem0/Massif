@@ -2,6 +2,9 @@ package fr.enderclem.massif.api;
 
 import fr.enderclem.massif.stages.DemoHeightmapProducer;
 import fr.enderclem.massif.stages.features.MountainClusterProducer;
+import fr.enderclem.massif.stages.hydrology.CellElevationProducer;
+import fr.enderclem.massif.stages.hydrology.DrainageBasinsProducer;
+import fr.enderclem.massif.stages.hydrology.DrainageGraphProducer;
 import fr.enderclem.massif.stages.zones.BorderFieldProducer;
 import fr.enderclem.massif.stages.zones.ZoneFieldProducer;
 import fr.enderclem.massif.stages.zones.ZoneGraphProducer;
@@ -63,6 +66,9 @@ public final class Massif {
             new BorderFieldProducer(),
             new ZoneGraphProducer(ZoneFieldProducer.DEFAULT_CELL_SIZE, window),
             new MountainClusterProducer(),
+            new CellElevationProducer(),
+            new DrainageGraphProducer(),
+            new DrainageBasinsProducer(),
             new DemoHeightmapProducer(window)
         );
     }

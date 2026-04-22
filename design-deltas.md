@@ -118,6 +118,48 @@ are computed over a globally enumerable graph (Phase 4b / later).
 
 ---
 
+## Coarse hydrology (Layer 2 / Phase 5)
+
+### P5 — Elevation at cell scale, not cell centroid
+Design doc says "zone-centroid-resolution heightmap". We publish per-cell
+elevation as `Map<cellId, Double>` rather than sampling at literal
+centroids, because the rest of the hydrology pass operates on cell ids.
+Same resolution, different data shape.
+
+### P5 — Elevation assigned from zone type + per-cell jitter
+Nominal height table keyed on `ZoneType.name()` (ocean/plains/mountain/…)
+plus a deterministic `(worldSeed ^ cellId)`-seeded jitter of ±0.08. The
+jitter is not in the design doc — needed in practice so priority-flood
+can always pick a unique downhill among neighbours of the same type.
+Walking-skeleton range only; real block heights arrive with the
+composition stage.
+
+### P5 — Priority-flood produces water level + downhill + is-lake flags
+`DrainageGraph.CellDrainage` bundles raw elevation, water level (≥ raw;
+raised in closed depressions), downhill cell id, and three booleans
+(`isLake`, `isOcean`, `isEndorheicTerminal`). Design doc names the
+drainage graph but doesn't specify the record; we picked this shape
+because consumers will typically want most of those fields together.
+
+### P5 — Endorheic terminals created by iterative re-seeding
+Design doc acknowledges endorheic basins ("marked endorheic") but
+doesn't specify discovery. We run priority-flood from oceans, then
+repeatedly pick the lowest unvisited cell as a new terminal and flood
+again until all cells are reached. Produces one terminal per endorheic
+closed basin, flagged via `isEndorheicTerminal`.
+
+### P5 — Tie-breaks in the priority queue are deterministic
+Queue orders by (water-level, cell-id). Two cells at the exact same
+water level get the lower-id processed first, so basin assignment at
+watershed boundaries doesn't depend on hash-map iteration order.
+
+### P5 — Basins published with BFS-ordered members
+`DrainageBasin.memberCellIds` starts with the outlet and walks the
+reverse-downhill graph in BFS order. Consuming upstream in order is
+just a loop over the list.
+
+---
+
 ## Visualisation
 
 ### P2 — Visualiser imports restricted to `api.*` + `blackboard.*`
@@ -147,9 +189,13 @@ Tracking what's spec'd but not built so nothing falls off:
 
 - `core:zone_weights(x, z)` — weighted zone distribution. Currently
   one-hot (dominant type only). Blocks: composition stage (Phase 7+).
-- `core:drainage_basins`, `core:drainage_graph`, `core:confluence_points`
-  — need per-cell elevation (Phase 5 coarse hydrology).
-- `core:lakes`, `core:river_graph`, `core:water_surface` — Phase 5.
+- `core:confluence_points` — deterministic confluence placement along
+  the drainage graph. Deferred; drainage graph + basins now exist.
+- `core:lakes`, `core:river_graph`, `core:water_surface` — the drainage
+  graph already identifies lakes (`isLake == true` on flooded cells);
+  promoting them into dedicated `core:lakes` records is the next step.
+  `core:river_graph` will come from walking downhill chains and
+  annotating with drainage area.
 - `core:set_pieces` and friends — post-hydrology.
 - `core:height(x, z)` (point-queryable, composed) — replaces the Phase 2
   `core:heightmap` placeholder. Arrives with the composition stage.

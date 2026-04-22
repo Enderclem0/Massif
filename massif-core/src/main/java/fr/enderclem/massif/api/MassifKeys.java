@@ -80,4 +80,28 @@ public final class MassifKeys {
      */
     public static final FeatureKey<MountainClusters> MOUNTAIN_CLUSTERS =
         FeatureKey.of("core:mountain_clusters", MountainClusters.class);
+
+    /**
+     * Per-zone-cell raw surface elevation, assigned from zone type + a
+     * deterministic per-cell jitter. Upstream of the hydrology pass.
+     */
+    public static final FeatureKey<CellElevation> CELL_ELEVATION =
+        FeatureKey.of("core:cell_elevation", CellElevation.class);
+
+    /**
+     * Priority-flood drainage: downhill pointer per cell + water level
+     * (raised inside closed basins → lakes) + list of terminals (ocean
+     * cells plus endorheic-basin bottoms). Consumes {@link #CELL_ELEVATION}
+     * and the zone graph.
+     */
+    public static final FeatureKey<DrainageGraph> DRAINAGE_GRAPH =
+        FeatureKey.of("core:drainage_graph", DrainageGraph.class);
+
+    /**
+     * Drainage basins — one per terminal in {@link #DRAINAGE_GRAPH}. Every
+     * non-terminal cell belongs to exactly one basin: whichever terminal
+     * its downhill chain reaches.
+     */
+    public static final FeatureKey<DrainageBasins> DRAINAGE_BASINS =
+        FeatureKey.of("core:drainage_basins", DrainageBasins.class);
 }
