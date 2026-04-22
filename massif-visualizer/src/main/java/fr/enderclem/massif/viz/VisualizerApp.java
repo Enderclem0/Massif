@@ -1,12 +1,12 @@
 package fr.enderclem.massif.viz;
 
 import fr.enderclem.massif.api.BorderField;
-import fr.enderclem.massif.api.BorderSample;
 import fr.enderclem.massif.api.Massif;
 import fr.enderclem.massif.api.MassifFramework;
 import fr.enderclem.massif.api.MassifKeys;
 import fr.enderclem.massif.api.MountainCluster;
 import fr.enderclem.massif.api.MountainClusters;
+import fr.enderclem.massif.api.WorldWindow;
 import fr.enderclem.massif.api.ZoneCell;
 import fr.enderclem.massif.api.ZoneField;
 import fr.enderclem.massif.api.ZoneGraph;
@@ -16,12 +16,14 @@ import fr.enderclem.massif.blackboard.FeatureKey;
 import java.awt.BasicStroke;
 import java.awt.BorderLayout;
 import java.awt.Color;
-import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseWheelEvent;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -54,42 +56,37 @@ import javax.swing.SwingUtilities;
  * <p>Imports are intentionally restricted to {@code api} and {@code blackboard}.
  * Anything this app can display exists because the framework published it
  * through the blackboard — if the visualizer can't show something, the
- * framework needs to publish it. This is the architectural discipline that
- * keeps the blackboard the real primary interface.
+ * framework needs to publish it.
  *
- * <p>Phase 2 capabilities are minimal: an editable seed combo (typed or
- * picked from saved entries), a randomize button, a save button, a grayscale
- * render of {@link MassifKeys#HEIGHTMAP}, and a dump of every key currently
- * on the sealed blackboard. Layer toggles, point inspection, parameter
- * tuning, and alternative renderers land as later phases publish more keys.
+ * <p>Phase 4 capabilities: editable seed combo, saved-seed dropdown,
+ * randomize, save, five rendering views (Heightmap / Zones / Border
+ * distance / Zone graph / Mountain clusters), plus zoom / pan controls and
+ * a live status line reporting the current world window. Each zoom or pan
+ * rebuilds the framework with a new {@link WorldWindow}; panning outside
+ * the default 512-block view widens the Lloyd-relaxed area automatically.
  */
 public final class VisualizerApp extends JFrame {
 
-    private static final int RENDER_SIZE = MassifKeys.VIEW_SIZE;
+    private static final int MIN_WINDOW_SIZE = 128;
+    private static final int MAX_WINDOW_SIZE = 2048;
     private static final Path SEEDS_FILE = Paths.get(
         System.getProperty("user.home"), ".massif", "seeds.tsv");
 
-    private final MassifFramework framework = Massif.defaultFramework();
+    private WorldWindow currentWindow = WorldWindow.defaultWindow();
 
-    /**
-     * Editable: user types a seed, or picks a saved entry from the dropdown.
-     * The dropdown list renders items as {@code "label (seed)"}; the editor
-     * always shows just the seed number ({@link SavedSeed#toString}).
-     */
     private final JComboBox<SavedSeed> seedCombo = new JComboBox<>();
     private final JComboBox<View> viewCombo = new JComboBox<>(View.values());
     private final JLabel statusLabel = new JLabel(" ");
+    private final JLabel windowLabel = new JLabel(" ");
     private final JTextArea keyListing = new JTextArea();
     private final RenderPanel canvas = new RenderPanel();
 
-    /** Last blackboard we generated; cached so switching view doesn't regenerate. */
     private Blackboard.Sealed lastBoard;
-
-    /** Suppresses combobox actionPerformed during programmatic reloads. */
+    private WorldWindow lastWindow;
     private boolean loadingCombo = false;
 
     private VisualizerApp() {
-        super("Massif — Phase 2 walking skeleton");
+        super("Massif — Phase 4 walking skeleton");
         setDefaultCloseOperation(EXIT_ON_CLOSE);
         buildUi();
         pack();
@@ -97,68 +94,90 @@ public final class VisualizerApp extends JFrame {
         regenerate();
     }
 
+    // ------------------------------------------------------------------
+    //  UI wiring
+    // ------------------------------------------------------------------
+
     private void buildUi() {
-        JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        controls.add(new JLabel("Seed:"));
+        JPanel seedRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        seedRow.add(new JLabel("Seed:"));
 
         seedCombo.setEditable(true);
-        // Prototype sets combo width to fit the widest label reasonably expected.
         seedCombo.setPrototypeDisplayValue(new SavedSeed("xxxxxxxxxxxxxxxxxxxx", 0L));
-        // Editor text field is visible when the combo is closed; keep it a
-        // reasonable width so short seeds don't leave the box cramped.
         if (seedCombo.getEditor().getEditorComponent() instanceof JTextField jtf) {
             jtf.setColumns(18);
         }
-        // Dropdown list rendering: "label  (seed)"; the editor still shows
-        // just the seed (because SavedSeed.toString returns the seed number).
         seedCombo.setRenderer(new DefaultListCellRenderer() {
             @Override
-            public Component getListCellRendererComponent(JList<?> list, Object value,
-                                                          int index, boolean isSelected,
-                                                          boolean cellHasFocus) {
-                String display;
-                if (value instanceof SavedSeed s) {
-                    display = s.label() + "  (" + s.seed() + ")";
-                } else {
-                    display = value == null ? "" : value.toString();
-                }
-                return super.getListCellRendererComponent(
-                    list, display, index, isSelected, cellHasFocus);
+            public java.awt.Component getListCellRendererComponent(JList<?> list, Object value,
+                                                                   int index, boolean isSelected,
+                                                                   boolean cellHasFocus) {
+                String display = value instanceof SavedSeed s
+                    ? s.label() + "  (" + s.seed() + ")"
+                    : value == null ? "" : value.toString();
+                return super.getListCellRendererComponent(list, display, index, isSelected, cellHasFocus);
             }
         });
-        seedCombo.addActionListener(e -> {
-            if (loadingCombo) return;
-            regenerate();
-        });
+        seedCombo.addActionListener(e -> { if (!loadingCombo) regenerate(); });
         setSeedText("1234");
-        controls.add(seedCombo);
+        seedRow.add(seedCombo);
 
         JButton randomBtn = new JButton("Randomize");
-        randomBtn.setToolTipText("Fill the seed with a random long and regenerate");
         randomBtn.addActionListener(e -> {
             setSeedText(Long.toString(ThreadLocalRandom.current().nextLong()));
             regenerate();
         });
-        controls.add(randomBtn);
+        seedRow.add(randomBtn);
 
         JButton saveBtn = new JButton("Save");
         saveBtn.setToolTipText("Save the current seed to " + SEEDS_FILE);
         saveBtn.addActionListener(e -> promptAndSave());
-        controls.add(saveBtn);
+        seedRow.add(saveBtn);
 
-        JButton go = new JButton("Generate");
-        go.addActionListener(e -> regenerate());
-        controls.add(go);
+        JButton goBtn = new JButton("Generate");
+        goBtn.addActionListener(e -> regenerate());
+        seedRow.add(goBtn);
 
-        controls.add(new JLabel("View:"));
+        seedRow.add(new JLabel("View:"));
         viewCombo.addActionListener(e -> renderLast());
-        controls.add(viewCombo);
+        seedRow.add(viewCombo);
+
+        JPanel viewRow = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        viewRow.add(new JLabel("Pan:"));
+        viewRow.add(panButton("←", -1, 0));
+        viewRow.add(panButton("→",  1, 0));
+        viewRow.add(panButton("↑",  0, -1));
+        viewRow.add(panButton("↓",  0,  1));
+        viewRow.add(new JLabel("  Zoom:"));
+        JButton zoomIn = new JButton("+");
+        zoomIn.setToolTipText("Zoom in (halve the window size)");
+        zoomIn.addActionListener(e -> zoom(0.5));
+        viewRow.add(zoomIn);
+        JButton zoomOut = new JButton("−");
+        zoomOut.setToolTipText("Zoom out (double the window size)");
+        zoomOut.addActionListener(e -> zoom(2.0));
+        viewRow.add(zoomOut);
+        JButton resetBtn = new JButton("Reset");
+        resetBtn.addActionListener(e -> {
+            currentWindow = WorldWindow.defaultWindow();
+            regenerate();
+        });
+        viewRow.add(resetBtn);
+        viewRow.add(windowLabel);
+
+        canvas.addMouseWheelListener(this::handleWheel);
+        canvas.addMouseListener(new DragPanHandler());
+        canvas.addMouseMotionListener(new DragPanHandler());
 
         keyListing.setEditable(false);
         keyListing.setRows(6);
         keyListing.setFont(new java.awt.Font("Monospaced", java.awt.Font.PLAIN, 12));
 
         reloadSavedCombo();
+
+        JPanel controls = new JPanel(new BorderLayout());
+        controls.add(seedRow, BorderLayout.NORTH);
+        controls.add(viewRow, BorderLayout.SOUTH);
 
         JPanel south = new JPanel(new BorderLayout());
         south.add(statusLabel, BorderLayout.NORTH);
@@ -170,19 +189,76 @@ public final class VisualizerApp extends JFrame {
         add(south, BorderLayout.SOUTH);
     }
 
-    private void setSeedText(String text) {
-        loadingCombo = true;
-        try {
-            seedCombo.getEditor().setItem(text);
-        } finally {
-            loadingCombo = false;
+    private JButton panButton(String label, int dirX, int dirZ) {
+        JButton b = new JButton(label);
+        b.addActionListener(e -> pan(dirX, dirZ));
+        return b;
+    }
+
+    // ------------------------------------------------------------------
+    //  Zoom / pan
+    // ------------------------------------------------------------------
+
+    private void zoom(double factor) {
+        int newSize = (int) Math.round(currentWindow.size() * factor);
+        newSize = Math.max(MIN_WINDOW_SIZE, Math.min(MAX_WINDOW_SIZE, newSize));
+        if (newSize == currentWindow.size()) return;
+        currentWindow = new WorldWindow(currentWindow.centerX(), currentWindow.centerZ(), newSize);
+        regenerate();
+    }
+
+    private void pan(int dirX, int dirZ) {
+        int step = Math.max(1, currentWindow.size() / 4);
+        currentWindow = new WorldWindow(
+            currentWindow.centerX() + dirX * step,
+            currentWindow.centerZ() + dirZ * step,
+            currentWindow.size());
+        regenerate();
+    }
+
+    private void handleWheel(MouseWheelEvent e) {
+        if (e.getWheelRotation() < 0) zoom(0.5);
+        else if (e.getWheelRotation() > 0) zoom(2.0);
+    }
+
+    /**
+     * Click-drag on the canvas pans the window. Updates are applied on
+     * release (not during drag) so each drag produces one regenerate
+     * instead of hundreds.
+     */
+    private final class DragPanHandler extends MouseAdapter {
+        private int startX;
+        private int startZ;
+        private WorldWindow startWindow;
+
+        @Override
+        public void mousePressed(MouseEvent e) {
+            startX = e.getX();
+            startZ = e.getY();
+            startWindow = currentWindow;
+        }
+
+        @Override
+        public void mouseReleased(MouseEvent e) {
+            if (startWindow == null) return;
+            int canvasSide = Math.min(canvas.getWidth(), canvas.getHeight());
+            if (canvasSide <= 0) return;
+            double scale = (double) startWindow.size() / canvasSide;
+            int dx = (int) Math.round((startX - e.getX()) * scale);
+            int dz = (int) Math.round((startZ - e.getY()) * scale);
+            if (dx == 0 && dz == 0) return;
+            currentWindow = new WorldWindow(
+                startWindow.centerX() + dx,
+                startWindow.centerZ() + dz,
+                startWindow.size());
+            startWindow = null;
+            regenerate();
         }
     }
 
-    private String currentSeedText() {
-        Object item = seedCombo.getEditor().getItem();
-        return item == null ? "" : item.toString().trim();
-    }
+    // ------------------------------------------------------------------
+    //  Pipeline trigger + rendering
+    // ------------------------------------------------------------------
 
     private void regenerate() {
         long seed;
@@ -192,87 +268,83 @@ public final class VisualizerApp extends JFrame {
             statusLabel.setText("Seed must be a long integer");
             return;
         }
+        MassifFramework fw = Massif.framework(
+            ZoneTypeRegistry.defaultRegistry(),
+            Massif.DEFAULT_LLOYD_ITERATIONS,
+            currentWindow);
+
         long t0 = System.nanoTime();
-        Blackboard.Sealed board = framework.generate(seed);
+        Blackboard.Sealed board = fw.generate(seed);
         long ms = (System.nanoTime() - t0) / 1_000_000;
 
         lastBoard = board;
+        lastWindow = currentWindow;
         renderLast();
         statusLabel.setText(String.format(
             "seed=%d  generated in %d ms  |  %d keys on blackboard",
             seed, ms, board.keys().size()));
+        windowLabel.setText(String.format(
+            "  center=(%d, %d) size=%d  (x: %d..%d  z: %d..%d)",
+            currentWindow.centerX(), currentWindow.centerZ(), currentWindow.size(),
+            currentWindow.x0(), currentWindow.x1(),
+            currentWindow.z0(), currentWindow.z1()));
         keyListing.setText(formatKeyList(board));
         keyListing.setCaretPosition(0);
     }
 
-    /** Paint {@link #lastBoard} using the currently-selected view. */
     private void renderLast() {
-        if (lastBoard == null) return;
+        if (lastBoard == null || lastWindow == null) return;
         View view = (View) viewCombo.getSelectedItem();
         if (view == null) view = View.HEIGHTMAP;
-        canvas.setImage(view.render(lastBoard));
+        canvas.setImage(view.render(lastBoard, lastWindow));
     }
 
-    /** Which blackboard key the canvas is rendering. */
     private enum View {
         HEIGHTMAP("Heightmap") {
-            @Override
-            BufferedImage render(Blackboard.Sealed board) {
+            @Override BufferedImage render(Blackboard.Sealed board, WorldWindow w) {
                 return heightmapImage(board.get(MassifKeys.HEIGHTMAP));
             }
         },
         ZONES("Zones") {
-            @Override
-            BufferedImage render(Blackboard.Sealed board) {
-                return zonesImage(
-                    board.get(MassifKeys.ZONE_FIELD),
-                    board.get(MassifKeys.ZONE_REGISTRY));
+            @Override BufferedImage render(Blackboard.Sealed board, WorldWindow w) {
+                return zonesImage(board.get(MassifKeys.ZONE_FIELD),
+                                  board.get(MassifKeys.ZONE_REGISTRY), w);
             }
         },
         BORDERS("Border distance") {
-            @Override
-            BufferedImage render(Blackboard.Sealed board) {
-                return borderDistanceImage(board.get(MassifKeys.BORDER_FIELD));
+            @Override BufferedImage render(Blackboard.Sealed board, WorldWindow w) {
+                return borderDistanceImage(board.get(MassifKeys.BORDER_FIELD), w);
             }
         },
         GRAPH("Zone graph") {
-            @Override
-            BufferedImage render(Blackboard.Sealed board) {
-                return zoneGraphImage(
-                    board.get(MassifKeys.ZONE_FIELD),
-                    board.get(MassifKeys.ZONE_REGISTRY),
-                    board.get(MassifKeys.ZONE_GRAPH));
+            @Override BufferedImage render(Blackboard.Sealed board, WorldWindow w) {
+                return zoneGraphImage(board.get(MassifKeys.ZONE_FIELD),
+                                      board.get(MassifKeys.ZONE_REGISTRY),
+                                      board.get(MassifKeys.ZONE_GRAPH), w);
             }
         },
         MOUNTAIN_CLUSTERS("Mountain clusters") {
-            @Override
-            BufferedImage render(Blackboard.Sealed board) {
-                return mountainClustersImage(
-                    board.get(MassifKeys.ZONE_FIELD),
-                    board.get(MassifKeys.ZONE_REGISTRY),
-                    board.get(MassifKeys.ZONE_GRAPH),
-                    board.get(MassifKeys.MOUNTAIN_CLUSTERS));
+            @Override BufferedImage render(Blackboard.Sealed board, WorldWindow w) {
+                return mountainClustersImage(board.get(MassifKeys.ZONE_FIELD),
+                                             board.get(MassifKeys.ZONE_REGISTRY),
+                                             board.get(MassifKeys.ZONE_GRAPH),
+                                             board.get(MassifKeys.MOUNTAIN_CLUSTERS), w);
             }
         };
 
         private final String label;
-
         View(String label) { this.label = label; }
-
         @Override public String toString() { return label; }
-
-        abstract BufferedImage render(Blackboard.Sealed board);
+        abstract BufferedImage render(Blackboard.Sealed board, WorldWindow window);
     }
 
     private static BufferedImage heightmapImage(float[][] field) {
         int size = field.length;
         BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
         float min = Float.POSITIVE_INFINITY, max = Float.NEGATIVE_INFINITY;
-        for (float[] row : field) {
-            for (float v : row) {
-                if (v < min) min = v;
-                if (v > max) max = v;
-            }
+        for (float[] row : field) for (float v : row) {
+            if (v < min) min = v;
+            if (v > max) max = v;
         }
         float range = Math.max(1e-6f, max - min);
         for (int z = 0; z < size; z++) {
@@ -285,15 +357,11 @@ public final class VisualizerApp extends JFrame {
         return img;
     }
 
-    private static BufferedImage zonesImage(ZoneField field, ZoneTypeRegistry registry) {
-        int size = RENDER_SIZE;
-        int x0 = -size / 2;
-        int z0 = -size / 2;
-        int[][] grid = field.sampleGrid(x0, z0, size, size);
+    private static BufferedImage zonesImage(ZoneField field, ZoneTypeRegistry registry, WorldWindow w) {
+        int size = w.size();
+        int[][] grid = field.sampleGrid(w.x0(), w.z0(), size, size);
         int[] palette = new int[registry.size()];
-        for (int i = 0; i < palette.length; i++) {
-            palette[i] = registry.get(i).displayColour();
-        }
+        for (int i = 0; i < palette.length; i++) palette[i] = registry.get(i).displayColour();
         BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
         for (int z = 0; z < size; z++) {
             for (int x = 0; x < size; x++) {
@@ -303,21 +371,18 @@ public final class VisualizerApp extends JFrame {
         return img;
     }
 
-    /** Distance to nearest Voronoi border, mapped to grayscale (black = at border). */
-    private static BufferedImage borderDistanceImage(BorderField field) {
-        int size = RENDER_SIZE;
-        int x0 = -size / 2;
-        int z0 = -size / 2;
+    private static BufferedImage borderDistanceImage(BorderField field, WorldWindow w) {
+        int size = w.size();
         double[][] dist = new double[size][size];
         double max = 0.0;
         for (int z = 0; z < size; z++) {
             for (int x = 0; x < size; x++) {
-                double d = field.sampleAt(x0 + x + 0.5, z0 + z + 0.5).distance();
+                double d = field.sampleAt(w.x0() + x + 0.5, w.z0() + z + 0.5).distance();
                 dist[z][x] = d;
                 if (d > max) max = d;
             }
         }
-        if (max <= 0.0) max = 1.0; // avoid div-by-zero on degenerate boards
+        if (max <= 0.0) max = 1.0;
         BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
         for (int z = 0; z < size; z++) {
             for (int x = 0; x < size; x++) {
@@ -329,67 +394,45 @@ public final class VisualizerApp extends JFrame {
         return img;
     }
 
-    /**
-     * Zone fill + seed dots + adjacency polyline overlay. Seeds outside the
-     * window are drawn too (they live in the halo ring of the graph) so
-     * edges that would otherwise dead-end at the window boundary visibly
-     * continue into the surrounding cells.
-     */
-    private static BufferedImage zoneGraphImage(ZoneField field,
-                                                ZoneTypeRegistry registry,
-                                                ZoneGraph graph) {
-        BufferedImage img = zonesImage(field, registry);
+    private static BufferedImage zoneGraphImage(ZoneField field, ZoneTypeRegistry registry,
+                                                ZoneGraph graph, WorldWindow w) {
+        BufferedImage img = zonesImage(field, registry, w);
         Graphics2D g2 = img.createGraphics();
         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        int size = RENDER_SIZE;
-        int half = size / 2;
-
-        var byId = graph.byId();
-        // Edges first so seed dots sit on top.
+        g2.setStroke(new BasicStroke(1.2f));
         g2.setColor(new Color(0, 0, 0, 160));
-        g2.setStroke(new java.awt.BasicStroke(1.2f));
+        Map<Integer, ZoneCell> byId = graph.byId();
         for (ZoneCell c : graph.cells()) {
-            int cx = (int) Math.round(c.seedX()) + half;
-            int cz = (int) Math.round(c.seedZ()) + half;
+            int cx = toPixel(c.seedX(), w.x0());
+            int cz = toPixel(c.seedZ(), w.z0());
             for (int nid : c.neighbourIds()) {
-                if (nid <= c.id()) continue; // draw each edge once
+                if (nid <= c.id()) continue;
                 ZoneCell n = byId.get(nid);
                 if (n == null) continue;
-                int nx = (int) Math.round(n.seedX()) + half;
-                int nz = (int) Math.round(n.seedZ()) + half;
-                g2.drawLine(cx, cz, nx, nz);
+                g2.drawLine(cx, cz, toPixel(n.seedX(), w.x0()), toPixel(n.seedZ(), w.z0()));
             }
         }
-        // Seed dots.
         g2.setColor(Color.WHITE);
         for (ZoneCell c : graph.cells()) {
-            int cx = (int) Math.round(c.seedX()) + half;
-            int cz = (int) Math.round(c.seedZ()) + half;
+            int cx = toPixel(c.seedX(), w.x0());
+            int cz = toPixel(c.seedZ(), w.z0());
             g2.fillOval(cx - 3, cz - 3, 6, 6);
         }
         g2.setColor(Color.BLACK);
         for (ZoneCell c : graph.cells()) {
-            int cx = (int) Math.round(c.seedX()) + half;
-            int cz = (int) Math.round(c.seedZ()) + half;
+            int cx = toPixel(c.seedX(), w.x0());
+            int cz = toPixel(c.seedZ(), w.z0());
             g2.drawOval(cx - 3, cz - 3, 6, 6);
         }
         g2.dispose();
         return img;
     }
 
-    /**
-     * Zones view + per-cluster tint over cells in each mountain cluster +
-     * centroid dot + major-axis line. Cluster colours are derived by a
-     * golden-ratio hash on cluster id so adjacent cluster ids get visually
-     * distinct hues.
-     */
-    private static BufferedImage mountainClustersImage(ZoneField field,
-                                                       ZoneTypeRegistry registry,
-                                                       ZoneGraph graph,
-                                                       MountainClusters clusters) {
-        BufferedImage img = zonesImage(field, registry);
-        int size = RENDER_SIZE;
-        int half = size / 2;
+    private static BufferedImage mountainClustersImage(ZoneField field, ZoneTypeRegistry registry,
+                                                       ZoneGraph graph, MountainClusters clusters,
+                                                       WorldWindow w) {
+        BufferedImage img = zonesImage(field, registry, w);
+        int size = w.size();
 
         Map<Integer, Integer> cellToCluster = new HashMap<>();
         for (MountainCluster c : clusters.clusters()) {
@@ -398,19 +441,16 @@ public final class VisualizerApp extends JFrame {
 
         ZoneCell[] cells = graph.cells().toArray(new ZoneCell[0]);
         for (int z = 0; z < size; z++) {
-            double wz = z - half + 0.5;
+            double wz = w.z0() + z + 0.5;
             for (int x = 0; x < size; x++) {
-                double wx = x - half + 0.5;
+                double wx = w.x0() + x + 0.5;
                 ZoneCell nearest = null;
                 double bestDistSq = Double.POSITIVE_INFINITY;
                 for (ZoneCell c : cells) {
                     double dx = c.seedX() - wx;
                     double dz = c.seedZ() - wz;
                     double d = dx * dx + dz * dz;
-                    if (d < bestDistSq) {
-                        bestDistSq = d;
-                        nearest = c;
-                    }
+                    if (d < bestDistSq) { bestDistSq = d; nearest = c; }
                 }
                 if (nearest == null) continue;
                 Integer clusterId = cellToCluster.get(nearest.id());
@@ -425,41 +465,41 @@ public final class VisualizerApp extends JFrame {
         g2.setStroke(new BasicStroke(2.0f));
         for (MountainCluster c : clusters.clusters()) {
             int colour = colourForCluster(c.id());
-            int centroidX = (int) Math.round(c.centroidX()) + half;
-            int centroidZ = (int) Math.round(c.centroidZ()) + half;
+            int cx = toPixel(c.centroidX(), w.x0());
+            int cz = toPixel(c.centroidZ(), w.z0());
             if (c.semiMajorAxisLength() > 0.0) {
                 double cosA = Math.cos(c.orientationAngle());
                 double sinA = Math.sin(c.orientationAngle());
                 double sm = c.semiMajorAxisLength();
-                int sx = (int) Math.round(c.centroidX() - cosA * sm) + half;
-                int sz = (int) Math.round(c.centroidZ() - sinA * sm) + half;
-                int ex = (int) Math.round(c.centroidX() + cosA * sm) + half;
-                int ez = (int) Math.round(c.centroidZ() + sinA * sm) + half;
+                int sx = toPixel(c.centroidX() - cosA * sm, w.x0());
+                int sz = toPixel(c.centroidZ() - sinA * sm, w.z0());
+                int ex = toPixel(c.centroidX() + cosA * sm, w.x0());
+                int ez = toPixel(c.centroidZ() + sinA * sm, w.z0());
                 g2.setColor(new Color(colour));
                 g2.drawLine(sx, sz, ex, ez);
             }
             g2.setColor(new Color(colour));
-            g2.fillOval(centroidX - 5, centroidZ - 5, 10, 10);
+            g2.fillOval(cx - 5, cz - 5, 10, 10);
             g2.setColor(Color.BLACK);
-            g2.drawOval(centroidX - 5, centroidZ - 5, 10, 10);
+            g2.drawOval(cx - 5, cz - 5, 10, 10);
         }
         g2.dispose();
         return img;
     }
 
+    /** Convert a world coordinate to the pixel offset within the current window. */
+    private static int toPixel(double worldCoord, int windowOrigin) {
+        return (int) Math.round(worldCoord - windowOrigin);
+    }
+
     private static int colourForCluster(int id) {
-        // Golden-ratio hash keeps hues visually spread for sequential ids.
         float h = ((id * 0x9E37) & 0xFFFF) / 65535f;
         return Color.getHSBColor(h, 0.75f, 0.95f).getRGB() & 0xFFFFFF;
     }
 
     private static int blendRgb(int a, int b, float t) {
-        int ar = (a >> 16) & 0xFF;
-        int ag = (a >> 8) & 0xFF;
-        int ab = a & 0xFF;
-        int br = (b >> 16) & 0xFF;
-        int bg = (b >> 8) & 0xFF;
-        int bb = b & 0xFF;
+        int ar = (a >> 16) & 0xFF, ag = (a >> 8) & 0xFF, ab = a & 0xFF;
+        int br = (b >> 16) & 0xFF, bg = (b >> 8) & 0xFF, bb = b & 0xFF;
         int r = (int) (ar + (br - ar) * t);
         int g = (int) (ag + (bg - ag) * t);
         int bl = (int) (ab + (bb - ab) * t);
@@ -479,16 +519,24 @@ public final class VisualizerApp extends JFrame {
         return sb.toString();
     }
 
+    private void setSeedText(String text) {
+        loadingCombo = true;
+        try {
+            seedCombo.getEditor().setItem(text);
+        } finally {
+            loadingCombo = false;
+        }
+    }
+
+    private String currentSeedText() {
+        Object item = seedCombo.getEditor().getItem();
+        return item == null ? "" : item.toString().trim();
+    }
+
     // ------------------------------------------------------------------
     //  Saved-seed persistence
     // ------------------------------------------------------------------
 
-    /**
-     * One entry in {@link #SEEDS_FILE}. {@link #toString} returns just the
-     * seed number so that when the user picks an entry from the combo the
-     * editor ends up containing a plain long — the dropdown-list renderer
-     * shows {@code "label  (seed)"} separately.
-     */
     private record SavedSeed(String label, long seed) {
         @Override public String toString() { return Long.toString(seed); }
     }
@@ -503,7 +551,7 @@ public final class VisualizerApp extends JFrame {
         }
         String input = JOptionPane.showInputDialog(this,
             "Label for seed " + seed + ":", Long.toString(seed));
-        if (input == null) return; // cancelled
+        if (input == null) return;
         String label = input.isBlank() ? Long.toString(seed) : input.trim();
         try {
             persistSeed(new SavedSeed(label, seed));
@@ -516,7 +564,6 @@ public final class VisualizerApp extends JFrame {
 
     private static void persistSeed(SavedSeed entry) throws IOException {
         Files.createDirectories(SEEDS_FILE.getParent());
-        // Tabs and newlines in the label would break the file format; strip them.
         String safeLabel = entry.label().replace('\t', ' ').replace('\n', ' ');
         String line = safeLabel + '\t' + entry.seed() + System.lineSeparator();
         Files.writeString(SEEDS_FILE, line, StandardCharsets.UTF_8,
@@ -531,7 +578,7 @@ public final class VisualizerApp extends JFrame {
         loadingCombo = true;
         try {
             seedCombo.setModel(model);
-            seedCombo.setSelectedIndex(-1); // nothing "selected"; editor keeps its text
+            seedCombo.setSelectedIndex(-1);
             seedCombo.getEditor().setItem(preserved);
         } finally {
             loadingCombo = false;
@@ -549,13 +596,9 @@ public final class VisualizerApp extends JFrame {
                 try {
                     long seed = Long.parseLong(line.substring(tab + 1).trim());
                     out.add(new SavedSeed(line.substring(0, tab), seed));
-                } catch (NumberFormatException ignored) {
-                    // skip malformed line
-                }
+                } catch (NumberFormatException ignored) {}
             }
-        } catch (IOException ignored) {
-            // unreadable file → empty list; status line surfaces nothing, not fatal
-        }
+        } catch (IOException ignored) {}
         return out;
     }
 
@@ -563,17 +606,13 @@ public final class VisualizerApp extends JFrame {
         SwingUtilities.invokeLater(() -> new VisualizerApp().setVisible(true));
     }
 
-    /**
-     * Centred, aspect-preserving scaler for whichever image the current view
-     * produced. Nearest-neighbour so the actual pixel grid is visible when the
-     * window is larger than the source.
-     */
+    /** Scaled-to-fit renderer for whichever image the current view produced. */
     private static final class RenderPanel extends JPanel {
 
         private BufferedImage image;
 
         RenderPanel() {
-            setPreferredSize(new Dimension(RENDER_SIZE, RENDER_SIZE));
+            setPreferredSize(new Dimension(640, 640));
             setBackground(Color.DARK_GRAY);
         }
 

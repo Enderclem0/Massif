@@ -15,7 +15,12 @@ public final class MassifKeys {
 
     private MassifKeys() {}
 
-    /** World-window side length in blocks for the walking-skeleton outputs. */
+    /**
+     * Default world-window side length in blocks. Still referenced by
+     * {@link WorldWindow#defaultWindow()} and the no-arg producer
+     * constructors; the visualiser threads an explicit {@link WorldWindow}
+     * through the framework when the user zooms or pans.
+     */
     public static final int VIEW_SIZE = 512;
 
     /**

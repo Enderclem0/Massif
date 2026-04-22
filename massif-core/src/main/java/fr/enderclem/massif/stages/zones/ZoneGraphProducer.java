@@ -1,6 +1,7 @@
 package fr.enderclem.massif.stages.zones;
 
 import fr.enderclem.massif.api.MassifKeys;
+import fr.enderclem.massif.api.WorldWindow;
 import fr.enderclem.massif.api.ZoneCell;
 import fr.enderclem.massif.api.ZoneGraph;
 import fr.enderclem.massif.api.ZoneSeed;
@@ -17,28 +18,31 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Builds the {@link ZoneGraph} by enumerating all seeds covering (and one
- * region beyond) the render window and detecting Voronoi adjacencies via
- * grid sampling: every orthogonally-adjacent pair of sample pixels with
- * different nearest seeds contributes an edge.
+ * Enumerates the Voronoi cells whose seeds fall inside the configured
+ * {@link WorldWindow} (plus a one-region halo) and detects Voronoi
+ * adjacencies by grid-sampling: any two adjacent sample pixels whose
+ * nearest seeds differ contribute an edge between those cells. Catches
+ * every adjacency longer than one pixel — sufficient for the walking-
+ * skeleton viewport; a rigorous Delaunay pass can replace the detector
+ * without changing the graph schema.
  *
- * <p>Seed enumeration prefers the pool's {@link ZoneSeedPool#allSeeds}
- * (populated by the Lloyd-relaxed pool) so the graph's cell positions
- * match the zone/border fields'. When the pool is unbounded (jittered
- * default) the producer falls back to walking the region grid itself.
+ * <p>Enumeration prefers the pool's {@link ZoneSeedPool#allSeeds} so
+ * graph cell positions match the field producers'. When the pool is
+ * unbounded (jittered default) the producer walks the region grid around
+ * the window on its own.
  */
 public final class ZoneGraphProducer implements Producer {
 
     private final int cellSize;
-    private final int windowSize;
+    private final WorldWindow window;
 
     public ZoneGraphProducer() {
-        this(ZoneFieldProducer.DEFAULT_CELL_SIZE, MassifKeys.VIEW_SIZE);
+        this(ZoneFieldProducer.DEFAULT_CELL_SIZE, WorldWindow.defaultWindow());
     }
 
-    public ZoneGraphProducer(int cellSize, int windowSize) {
+    public ZoneGraphProducer(int cellSize, WorldWindow window) {
         this.cellSize = cellSize;
-        this.windowSize = windowSize;
+        this.window = window;
     }
 
     @Override
@@ -61,13 +65,11 @@ public final class ZoneGraphProducer implements Producer {
         ZoneSeedPool pool = ctx.read(MassifKeys.ZONE_SEED_POOL);
         int kindCount = ctx.read(MassifKeys.ZONE_REGISTRY).size();
 
-        int windowHalf = windowSize / 2;
-        List<ZoneSeed> seeds = gatherSeeds(pool, ctx.seed(), kindCount, windowHalf);
+        List<ZoneSeed> seeds = gatherSeeds(pool, ctx.seed(), kindCount);
 
-        // Grid-sample the visible window to determine adjacencies.
-        int sampleSize = windowSize;
-        int sampleX0 = -windowHalf;
-        int sampleZ0 = -windowHalf;
+        int sampleSize = window.size();
+        int sampleX0 = window.x0();
+        int sampleZ0 = window.z0();
         int[][] nearest = new int[sampleSize][sampleSize];
         int n = seeds.size();
         for (int z = 0; z < sampleSize; z++) {
@@ -113,19 +115,19 @@ public final class ZoneGraphProducer implements Producer {
         ctx.write(MassifKeys.ZONE_GRAPH, new ZoneGraph(cells));
     }
 
-    private List<ZoneSeed> gatherSeeds(ZoneSeedPool pool, long worldSeed, int kindCount, int windowHalf) {
+    private List<ZoneSeed> gatherSeeds(ZoneSeedPool pool, long worldSeed, int kindCount) {
         ZoneSeed[] poolSeeds = pool.allSeeds();
         if (poolSeeds.length > 0) {
             List<ZoneSeed> out = new ArrayList<>(poolSeeds.length);
             Collections.addAll(out, poolSeeds);
             return out;
         }
-        // Unbounded pool (e.g. jittered default) — walk the region grid over
-        // the window plus a one-cell halo and ask ZoneSeeds directly.
-        int rxMin = Math.floorDiv(-windowHalf - cellSize, cellSize);
-        int rxMax = Math.floorDiv(windowHalf + cellSize, cellSize);
-        int rzMin = Math.floorDiv(-windowHalf - cellSize, cellSize);
-        int rzMax = Math.floorDiv(windowHalf + cellSize, cellSize);
+        // Unbounded pool (jittered default): walk the region grid ourselves
+        // over the window plus one-cell halo.
+        int rxMin = Math.floorDiv(window.x0() - cellSize, cellSize);
+        int rxMax = Math.floorDiv(window.x1() + cellSize, cellSize);
+        int rzMin = Math.floorDiv(window.z0() - cellSize, cellSize);
+        int rzMax = Math.floorDiv(window.z1() + cellSize, cellSize);
         List<ZoneSeed> out = new ArrayList<>();
         for (int rz = rzMin; rz <= rzMax; rz++) {
             for (int rx = rxMin; rx <= rxMax; rx++) {

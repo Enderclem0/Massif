@@ -1,6 +1,7 @@
 package fr.enderclem.massif.stages.zones;
 
 import fr.enderclem.massif.api.MassifKeys;
+import fr.enderclem.massif.api.WorldWindow;
 import fr.enderclem.massif.api.ZoneSeed;
 import fr.enderclem.massif.api.ZoneSeedPool;
 import fr.enderclem.massif.api.ZoneTypeRegistry;
@@ -21,27 +22,26 @@ import java.util.Set;
  * <p>With {@code relaxIterations == 0} the producer publishes a
  * {@link JitteredZoneSeedPool} — on-demand, unbounded, the original Phase 3
  * behaviour. With {@code relaxIterations > 0} it computes Lloyd-relaxed
- * positions over the window {@code [-windowSize/2, windowSize/2]²} plus a
- * one-cell halo and wraps them in a {@link RelaxedZoneSeedPool} with the
- * jittered pool as the fallback for out-of-window queries.
+ * positions over the {@link WorldWindow} plus a one-cell halo and wraps
+ * them in a {@link RelaxedZoneSeedPool} with the jittered pool as the
+ * fallback for out-of-window queries.
  */
 public final class ZoneSeedPoolProducer implements Producer {
 
     private final int cellSize;
     private final int relaxIterations;
-    private final int windowSize;
+    private final WorldWindow window;
 
     public ZoneSeedPoolProducer() {
-        this(ZoneFieldProducer.DEFAULT_CELL_SIZE, 0, MassifKeys.VIEW_SIZE);
+        this(ZoneFieldProducer.DEFAULT_CELL_SIZE, 0, WorldWindow.defaultWindow());
     }
 
-    public ZoneSeedPoolProducer(int cellSize, int relaxIterations, int windowSize) {
+    public ZoneSeedPoolProducer(int cellSize, int relaxIterations, WorldWindow window) {
         if (cellSize <= 0) throw new IllegalArgumentException("cellSize must be positive");
         if (relaxIterations < 0) throw new IllegalArgumentException("relaxIterations must be ≥ 0");
-        if (windowSize <= 0) throw new IllegalArgumentException("windowSize must be positive");
         this.cellSize = cellSize;
         this.relaxIterations = relaxIterations;
-        this.windowSize = windowSize;
+        this.window = window;
     }
 
     @Override
@@ -70,15 +70,13 @@ public final class ZoneSeedPoolProducer implements Producer {
             return;
         }
 
-        // Collect jittered seeds over window + 1-cell halo. The halo's seeds
-        // don't appear in the rendered viewport but they exist so the seeds
-        // on the window edge relax against real neighbours, not against a
-        // vacuum that would bias them inward.
-        int windowHalf = windowSize / 2;
-        int x0 = -windowHalf - cellSize;
-        int z0 = -windowHalf - cellSize;
-        int x1 = windowHalf + cellSize;
-        int z1 = windowHalf + cellSize;
+        // Window + one-cell halo. Halo seeds don't appear in the rendered
+        // viewport but exist so the seeds on the window edge relax against
+        // real neighbours instead of against a vacuum that biases them inward.
+        int x0 = window.x0() - cellSize;
+        int z0 = window.z0() - cellSize;
+        int x1 = window.x1() + cellSize;
+        int z1 = window.z1() + cellSize;
         int rxMin = Math.floorDiv(x0, cellSize);
         int rxMax = Math.floorDiv(x1 - 1, cellSize);
         int rzMin = Math.floorDiv(z0, cellSize);
@@ -95,7 +93,7 @@ public final class ZoneSeedPoolProducer implements Producer {
         List<ZoneSeed> relaxed = LloydRelaxation.relax(initial, x0, z0, x1, z1, relaxIterations);
         ZoneSeedPool pool = new RelaxedZoneSeedPool(
             relaxed.toArray(new ZoneSeed[0]),
-            -windowHalf, -windowHalf, windowHalf, windowHalf,
+            window.x0(), window.z0(), window.x1(), window.z1(),
             jittered);
         ctx.write(MassifKeys.ZONE_SEED_POOL, pool);
     }

@@ -21,38 +21,49 @@ public final class Massif {
     private Massif() {}
 
     /**
-     * Framework with the default {@link ZoneTypeRegistry} and
-     * {@link #DEFAULT_LLOYD_ITERATIONS} iterations of Lloyd relaxation on
-     * the zone seed pool.
+     * Framework with the default {@link ZoneTypeRegistry}, the default
+     * {@link WorldWindow}, and {@link #DEFAULT_LLOYD_ITERATIONS} iterations
+     * of Lloyd relaxation.
      */
     public static MassifFramework defaultFramework() {
-        return framework(ZoneTypeRegistry.defaultRegistry(), DEFAULT_LLOYD_ITERATIONS);
+        return framework(
+            ZoneTypeRegistry.defaultRegistry(),
+            DEFAULT_LLOYD_ITERATIONS,
+            WorldWindow.defaultWindow());
     }
 
     /**
-     * Framework with the given registry and zero Lloyd iterations (seed pool
-     * is the jittered on-demand one — original Phase 3 behaviour).
+     * Framework with the given registry; uses the default world window
+     * and zero Lloyd iterations.
      */
     public static MassifFramework framework(ZoneTypeRegistry registry) {
-        return framework(registry, 0);
+        return framework(registry, 0, WorldWindow.defaultWindow());
     }
 
     /**
-     * Framework wired with every Phase-3 producer: registry publication,
-     * the chosen seed pool (jittered if {@code lloydIterations == 0},
-     * Lloyd-relaxed otherwise), zone field, border field, zone graph, and
-     * the walking-skeleton demo heightmap.
+     * Framework with the given registry and Lloyd iteration count; uses
+     * the default world window.
      */
     public static MassifFramework framework(ZoneTypeRegistry registry, int lloydIterations) {
+        return framework(registry, lloydIterations, WorldWindow.defaultWindow());
+    }
+
+    /**
+     * Framework wired with every Phase-4 producer at the specified world
+     * window. The visualiser rebuilds the framework with a new window each
+     * time the user zooms or pans.
+     */
+    public static MassifFramework framework(ZoneTypeRegistry registry,
+                                            int lloydIterations,
+                                            WorldWindow window) {
         return MassifFramework.of(
             new ZoneRegistryProducer(registry),
-            new ZoneSeedPoolProducer(
-                ZoneFieldProducer.DEFAULT_CELL_SIZE, lloydIterations, MassifKeys.VIEW_SIZE),
+            new ZoneSeedPoolProducer(ZoneFieldProducer.DEFAULT_CELL_SIZE, lloydIterations, window),
             new ZoneFieldProducer(),
             new BorderFieldProducer(),
-            new ZoneGraphProducer(),
+            new ZoneGraphProducer(ZoneFieldProducer.DEFAULT_CELL_SIZE, window),
             new MountainClusterProducer(),
-            new DemoHeightmapProducer()
+            new DemoHeightmapProducer(window)
         );
     }
 }
