@@ -1,6 +1,7 @@
 package fr.enderclem.massif.api;
 
 import fr.enderclem.massif.stages.DemoHeightmapProducer;
+import fr.enderclem.massif.stages.features.MountainClusterProducer;
 import fr.enderclem.massif.stages.zones.BorderFieldProducer;
 import fr.enderclem.massif.stages.zones.ZoneFieldProducer;
 import fr.enderclem.massif.stages.zones.ZoneGraphProducer;
@@ -50,6 +51,7 @@ public final class Massif {
             new ZoneFieldProducer(),
             new BorderFieldProducer(),
             new ZoneGraphProducer(),
+            new MountainClusterProducer(),
             new DemoHeightmapProducer()
         );
     }

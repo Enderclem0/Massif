@@ -66,4 +66,13 @@ public final class MassifKeys {
      */
     public static final FeatureKey<BorderField> BORDER_FIELD =
         FeatureKey.of("core:border_field", BorderField.class);
+
+    /**
+     * Connected components of mountain-type cells in the zone graph, each
+     * with structural-plan metadata (centroid, orientation, semi-major
+     * extent, peak-count hint, selected generation technique). The first
+     * {@link MountainCluster}-level output — Layer 2 of the design doc.
+     */
+    public static final FeatureKey<MountainClusters> MOUNTAIN_CLUSTERS =
+        FeatureKey.of("core:mountain_clusters", MountainClusters.class);
 }

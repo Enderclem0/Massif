@@ -5,12 +5,15 @@ import fr.enderclem.massif.api.BorderSample;
 import fr.enderclem.massif.api.Massif;
 import fr.enderclem.massif.api.MassifFramework;
 import fr.enderclem.massif.api.MassifKeys;
+import fr.enderclem.massif.api.MountainCluster;
+import fr.enderclem.massif.api.MountainClusters;
 import fr.enderclem.massif.api.ZoneCell;
 import fr.enderclem.massif.api.ZoneField;
 import fr.enderclem.massif.api.ZoneGraph;
 import fr.enderclem.massif.api.ZoneTypeRegistry;
 import fr.enderclem.massif.blackboard.Blackboard;
 import fr.enderclem.massif.blackboard.FeatureKey;
+import java.awt.BasicStroke;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
@@ -27,7 +30,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import javax.swing.DefaultComboBoxModel;
 import javax.swing.DefaultListCellRenderer;
@@ -238,6 +243,16 @@ public final class VisualizerApp extends JFrame {
                     board.get(MassifKeys.ZONE_REGISTRY),
                     board.get(MassifKeys.ZONE_GRAPH));
             }
+        },
+        MOUNTAIN_CLUSTERS("Mountain clusters") {
+            @Override
+            BufferedImage render(Blackboard.Sealed board) {
+                return mountainClustersImage(
+                    board.get(MassifKeys.ZONE_FIELD),
+                    board.get(MassifKeys.ZONE_REGISTRY),
+                    board.get(MassifKeys.ZONE_GRAPH),
+                    board.get(MassifKeys.MOUNTAIN_CLUSTERS));
+            }
         };
 
         private final String label;
@@ -360,6 +375,95 @@ public final class VisualizerApp extends JFrame {
         }
         g2.dispose();
         return img;
+    }
+
+    /**
+     * Zones view + per-cluster tint over cells in each mountain cluster +
+     * centroid dot + major-axis line. Cluster colours are derived by a
+     * golden-ratio hash on cluster id so adjacent cluster ids get visually
+     * distinct hues.
+     */
+    private static BufferedImage mountainClustersImage(ZoneField field,
+                                                       ZoneTypeRegistry registry,
+                                                       ZoneGraph graph,
+                                                       MountainClusters clusters) {
+        BufferedImage img = zonesImage(field, registry);
+        int size = RENDER_SIZE;
+        int half = size / 2;
+
+        Map<Integer, Integer> cellToCluster = new HashMap<>();
+        for (MountainCluster c : clusters.clusters()) {
+            for (int cid : c.cellIds()) cellToCluster.put(cid, c.id());
+        }
+
+        ZoneCell[] cells = graph.cells().toArray(new ZoneCell[0]);
+        for (int z = 0; z < size; z++) {
+            double wz = z - half + 0.5;
+            for (int x = 0; x < size; x++) {
+                double wx = x - half + 0.5;
+                ZoneCell nearest = null;
+                double bestDistSq = Double.POSITIVE_INFINITY;
+                for (ZoneCell c : cells) {
+                    double dx = c.seedX() - wx;
+                    double dz = c.seedZ() - wz;
+                    double d = dx * dx + dz * dz;
+                    if (d < bestDistSq) {
+                        bestDistSq = d;
+                        nearest = c;
+                    }
+                }
+                if (nearest == null) continue;
+                Integer clusterId = cellToCluster.get(nearest.id());
+                if (clusterId == null) continue;
+                int base = img.getRGB(x, z);
+                img.setRGB(x, z, blendRgb(base, colourForCluster(clusterId), 0.35f));
+            }
+        }
+
+        Graphics2D g2 = img.createGraphics();
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g2.setStroke(new BasicStroke(2.0f));
+        for (MountainCluster c : clusters.clusters()) {
+            int colour = colourForCluster(c.id());
+            int centroidX = (int) Math.round(c.centroidX()) + half;
+            int centroidZ = (int) Math.round(c.centroidZ()) + half;
+            if (c.semiMajorAxisLength() > 0.0) {
+                double cosA = Math.cos(c.orientationAngle());
+                double sinA = Math.sin(c.orientationAngle());
+                double sm = c.semiMajorAxisLength();
+                int sx = (int) Math.round(c.centroidX() - cosA * sm) + half;
+                int sz = (int) Math.round(c.centroidZ() - sinA * sm) + half;
+                int ex = (int) Math.round(c.centroidX() + cosA * sm) + half;
+                int ez = (int) Math.round(c.centroidZ() + sinA * sm) + half;
+                g2.setColor(new Color(colour));
+                g2.drawLine(sx, sz, ex, ez);
+            }
+            g2.setColor(new Color(colour));
+            g2.fillOval(centroidX - 5, centroidZ - 5, 10, 10);
+            g2.setColor(Color.BLACK);
+            g2.drawOval(centroidX - 5, centroidZ - 5, 10, 10);
+        }
+        g2.dispose();
+        return img;
+    }
+
+    private static int colourForCluster(int id) {
+        // Golden-ratio hash keeps hues visually spread for sequential ids.
+        float h = ((id * 0x9E37) & 0xFFFF) / 65535f;
+        return Color.getHSBColor(h, 0.75f, 0.95f).getRGB() & 0xFFFFFF;
+    }
+
+    private static int blendRgb(int a, int b, float t) {
+        int ar = (a >> 16) & 0xFF;
+        int ag = (a >> 8) & 0xFF;
+        int ab = a & 0xFF;
+        int br = (b >> 16) & 0xFF;
+        int bg = (b >> 8) & 0xFF;
+        int bb = b & 0xFF;
+        int r = (int) (ar + (br - ar) * t);
+        int g = (int) (ag + (bg - ag) * t);
+        int bl = (int) (ab + (bb - ab) * t);
+        return (r << 16) | (g << 8) | bl;
     }
 
     private static String formatKeyList(Blackboard.Sealed board) {
