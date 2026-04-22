@@ -1,4 +1,4 @@
-package fr.enderclem.massif.layers.voronoi;
+package fr.enderclem.massif.stages.zones;
 
 import fr.enderclem.massif.primitives.RegionCoord;
 

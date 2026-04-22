@@ -29,7 +29,7 @@ public final class DemoHeightmapProducer implements Producer {
 
     @Override
     public void compute(ExecutionContext ctx) {
-        int size = MassifKeys.DEMO_SIZE;
+        int size = MassifKeys.VIEW_SIZE;
         long seed = ctx.seed();
         float[][] map = new float[size][size];
         double freq = 1.0 / 64.0;  // one fBM period spans ~64 cells

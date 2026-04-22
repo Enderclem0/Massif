@@ -1,6 +1,8 @@
 package fr.enderclem.massif.api;
 
 import fr.enderclem.massif.stages.DemoHeightmapProducer;
+import fr.enderclem.massif.stages.zones.ZoneFieldProducer;
+import fr.enderclem.massif.stages.zones.ZoneRegistryProducer;
 
 /**
  * Public factory for consumers that just want a ready-to-run framework.
@@ -13,11 +15,24 @@ public final class Massif {
 
     /**
      * A framework wired with every producer the current rebuild phase has
-     * implemented. Phase 2 ships a single demo heightmap producer; later
-     * phases plug zone, structural-plan, hydrology, technique, and
-     * composition producers into the same factory.
+     * implemented. Uses {@link ZoneTypeRegistry#defaultRegistry()} for zone
+     * types; call {@link #framework(ZoneTypeRegistry)} to supply a custom
+     * registry.
      */
     public static MassifFramework defaultFramework() {
-        return MassifFramework.of(new DemoHeightmapProducer());
+        return framework(ZoneTypeRegistry.defaultRegistry());
+    }
+
+    /**
+     * Framework with the given {@code registry}. Wires the Phase 3 producers:
+     * registry publication, Voronoi zone field, and the Phase 2 demo
+     * heightmap (kept until Layer 4 composition lands).
+     */
+    public static MassifFramework framework(ZoneTypeRegistry registry) {
+        return MassifFramework.of(
+            new ZoneRegistryProducer(registry),
+            new ZoneFieldProducer(),
+            new DemoHeightmapProducer()
+        );
     }
 }

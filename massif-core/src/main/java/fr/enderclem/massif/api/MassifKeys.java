@@ -7,25 +7,35 @@ import fr.enderclem.massif.blackboard.FeatureKey;
  * here by constant reference rather than re-declaring them; the constants
  * are the single source of truth for names and value types.
  *
- * <p>The inventory is intentionally small during the Phase 2 walking
- * skeleton — it grows as each rebuild phase lands (zones, structural plan,
- * hydrology, techniques, composition). Every addition is backwards-compatible
- * (new constants only); existing entries follow additive-schema-evolution
- * rules.
+ * <p>New keys are added as each rebuild phase lands; every addition is
+ * backwards-compatible (new constants only) and existing entries follow
+ * additive-schema-evolution rules.
  */
 public final class MassifKeys {
 
     private MassifKeys() {}
 
-    /** Region side length in cells for the current walking-skeleton outputs. */
-    public static final int DEMO_SIZE = 256;
+    /** World-window side length in blocks for the walking-skeleton outputs. */
+    public static final int VIEW_SIZE = 512;
 
     /**
-     * Surface-elevation grid for a single centred region, indexed {@code [z][x]}.
-     * Values are roughly in {@code [-1, 1]}. Phase 2 placeholder — replaced by
-     * {@code core:height} (sampled, world-coordinate-queryable) once the
-     * composition stage lands.
+     * Surface-elevation grid covering the current walking-skeleton viewport,
+     * indexed {@code [z][x]}. Values roughly in {@code [-1, 1]}. Phase 2
+     * placeholder — replaced by a world-coordinate-queryable {@code
+     * core:height} when the composition stage lands.
      */
     public static final FeatureKey<float[][]> HEIGHTMAP =
         FeatureKey.of("core:heightmap", float[][].class);
+
+    /** Ordered, immutable registry of all zone types used by the current world. */
+    public static final FeatureKey<ZoneTypeRegistry> ZONE_REGISTRY =
+        FeatureKey.of("core:zone_registry", ZoneTypeRegistry.class);
+
+    /**
+     * Queryable zone classification: at any world coordinate returns the
+     * integer id of the zone type covering it. Ids are defined by
+     * {@link #ZONE_REGISTRY}.
+     */
+    public static final FeatureKey<ZoneField> ZONE_FIELD =
+        FeatureKey.of("core:zone_field", ZoneField.class);
 }

@@ -3,6 +3,8 @@ package fr.enderclem.massif.viz;
 import fr.enderclem.massif.api.Massif;
 import fr.enderclem.massif.api.MassifFramework;
 import fr.enderclem.massif.api.MassifKeys;
+import fr.enderclem.massif.api.ZoneField;
+import fr.enderclem.massif.api.ZoneTypeRegistry;
 import fr.enderclem.massif.blackboard.Blackboard;
 import fr.enderclem.massif.blackboard.FeatureKey;
 import java.awt.BorderLayout;
@@ -54,7 +56,7 @@ import javax.swing.SwingUtilities;
  */
 public final class VisualizerApp extends JFrame {
 
-    private static final int RENDER_SIZE = MassifKeys.DEMO_SIZE;
+    private static final int RENDER_SIZE = MassifKeys.VIEW_SIZE;
     private static final Path SEEDS_FILE = Paths.get(
         System.getProperty("user.home"), ".massif", "seeds.tsv");
 
@@ -66,9 +68,13 @@ public final class VisualizerApp extends JFrame {
      * always shows just the seed number ({@link SavedSeed#toString}).
      */
     private final JComboBox<SavedSeed> seedCombo = new JComboBox<>();
+    private final JComboBox<View> viewCombo = new JComboBox<>(View.values());
     private final JLabel statusLabel = new JLabel(" ");
     private final JTextArea keyListing = new JTextArea();
     private final RenderPanel canvas = new RenderPanel();
+
+    /** Last blackboard we generated; cached so switching view doesn't regenerate. */
+    private Blackboard.Sealed lastBoard;
 
     /** Suppresses combobox actionPerformed during programmatic reloads. */
     private boolean loadingCombo = false;
@@ -135,6 +141,10 @@ public final class VisualizerApp extends JFrame {
         go.addActionListener(e -> regenerate());
         controls.add(go);
 
+        controls.add(new JLabel("View:"));
+        viewCombo.addActionListener(e -> renderLast());
+        controls.add(viewCombo);
+
         keyListing.setEditable(false);
         keyListing.setRows(6);
         keyListing.setFont(new java.awt.Font("Monospaced", java.awt.Font.PLAIN, 12));
@@ -177,13 +187,86 @@ public final class VisualizerApp extends JFrame {
         Blackboard.Sealed board = framework.generate(seed);
         long ms = (System.nanoTime() - t0) / 1_000_000;
 
-        float[][] map = board.get(MassifKeys.HEIGHTMAP);
-        canvas.setField(map);
+        lastBoard = board;
+        renderLast();
         statusLabel.setText(String.format(
             "seed=%d  generated in %d ms  |  %d keys on blackboard",
             seed, ms, board.keys().size()));
         keyListing.setText(formatKeyList(board));
         keyListing.setCaretPosition(0);
+    }
+
+    /** Paint {@link #lastBoard} using the currently-selected view. */
+    private void renderLast() {
+        if (lastBoard == null) return;
+        View view = (View) viewCombo.getSelectedItem();
+        if (view == null) view = View.HEIGHTMAP;
+        canvas.setImage(view.render(lastBoard));
+    }
+
+    /** Which blackboard key the canvas is rendering. */
+    private enum View {
+        HEIGHTMAP("Heightmap") {
+            @Override
+            BufferedImage render(Blackboard.Sealed board) {
+                return heightmapImage(board.get(MassifKeys.HEIGHTMAP));
+            }
+        },
+        ZONES("Zones") {
+            @Override
+            BufferedImage render(Blackboard.Sealed board) {
+                return zonesImage(
+                    board.get(MassifKeys.ZONE_FIELD),
+                    board.get(MassifKeys.ZONE_REGISTRY));
+            }
+        };
+
+        private final String label;
+
+        View(String label) { this.label = label; }
+
+        @Override public String toString() { return label; }
+
+        abstract BufferedImage render(Blackboard.Sealed board);
+    }
+
+    private static BufferedImage heightmapImage(float[][] field) {
+        int size = field.length;
+        BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
+        float min = Float.POSITIVE_INFINITY, max = Float.NEGATIVE_INFINITY;
+        for (float[] row : field) {
+            for (float v : row) {
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+        }
+        float range = Math.max(1e-6f, max - min);
+        for (int z = 0; z < size; z++) {
+            for (int x = 0; x < size; x++) {
+                float t = (field[z][x] - min) / range;
+                int g = Math.round(Math.max(0f, Math.min(1f, t)) * 255f);
+                img.setRGB(x, z, (g << 16) | (g << 8) | g);
+            }
+        }
+        return img;
+    }
+
+    private static BufferedImage zonesImage(ZoneField field, ZoneTypeRegistry registry) {
+        int size = RENDER_SIZE;
+        int x0 = -size / 2;
+        int z0 = -size / 2;
+        int[][] grid = field.sampleGrid(x0, z0, size, size);
+        int[] palette = new int[registry.size()];
+        for (int i = 0; i < palette.length; i++) {
+            palette[i] = registry.get(i).displayColour();
+        }
+        BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
+        for (int z = 0; z < size; z++) {
+            for (int x = 0; x < size; x++) {
+                img.setRGB(x, z, palette[grid[z][x]]);
+            }
+        }
+        return img;
     }
 
     private static String formatKeyList(Blackboard.Sealed board) {
@@ -283,7 +366,11 @@ public final class VisualizerApp extends JFrame {
         SwingUtilities.invokeLater(() -> new VisualizerApp().setVisible(true));
     }
 
-    /** Scales a {@code float[][]} heightmap into the rendered image on repaint. */
+    /**
+     * Centred, aspect-preserving scaler for whichever image the current view
+     * produced. Nearest-neighbour so the actual pixel grid is visible when the
+     * window is larger than the source.
+     */
     private static final class RenderPanel extends JPanel {
 
         private BufferedImage image;
@@ -293,25 +380,8 @@ public final class VisualizerApp extends JFrame {
             setBackground(Color.DARK_GRAY);
         }
 
-        void setField(float[][] field) {
-            int size = field.length;
-            BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_RGB);
-            float min = Float.POSITIVE_INFINITY, max = Float.NEGATIVE_INFINITY;
-            for (float[] row : field) {
-                for (float v : row) {
-                    if (v < min) min = v;
-                    if (v > max) max = v;
-                }
-            }
-            float range = Math.max(1e-6f, max - min);
-            for (int z = 0; z < size; z++) {
-                for (int x = 0; x < size; x++) {
-                    float t = (field[z][x] - min) / range;
-                    int g = Math.round(Math.max(0f, Math.min(1f, t)) * 255f);
-                    img.setRGB(x, z, (g << 16) | (g << 8) | g);
-                }
-            }
-            this.image = img;
+        void setImage(BufferedImage image) {
+            this.image = image;
             repaint();
         }
 

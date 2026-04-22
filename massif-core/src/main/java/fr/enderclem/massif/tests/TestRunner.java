@@ -17,6 +17,7 @@ public final class TestRunner {
         int fails = 0;
         fails += FeatureKeyTest.run();
         fails += ScheduleTest.run();
+        fails += ZonesTest.run();
 
         if (fails == 0) {
             System.out.println("All tests passed.");
