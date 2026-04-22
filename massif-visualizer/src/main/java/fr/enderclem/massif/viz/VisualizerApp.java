@@ -7,6 +7,7 @@ import fr.enderclem.massif.blackboard.Blackboard;
 import fr.enderclem.massif.blackboard.FeatureKey;
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Graphics;
@@ -23,10 +24,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import javax.swing.DefaultComboBoxModel;
+import javax.swing.DefaultListCellRenderer;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
+import javax.swing.JList;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
@@ -43,11 +46,11 @@ import javax.swing.SwingUtilities;
  * framework needs to publish it. This is the architectural discipline that
  * keeps the blackboard the real primary interface.
  *
- * <p>Phase 2 capabilities are minimal: one seed input, a generate button,
- * a grayscale render of {@link MassifKeys#HEIGHTMAP}, and a dump of every
- * key currently on the sealed blackboard. Layer toggles, point inspection,
- * parameter tuning, and alternative renderers land as later phases publish
- * more keys.
+ * <p>Phase 2 capabilities are minimal: an editable seed combo (typed or
+ * picked from saved entries), a randomize button, a save button, a grayscale
+ * render of {@link MassifKeys#HEIGHTMAP}, and a dump of every key currently
+ * on the sealed blackboard. Layer toggles, point inspection, parameter
+ * tuning, and alternative renderers land as later phases publish more keys.
  */
 public final class VisualizerApp extends JFrame {
 
@@ -57,8 +60,12 @@ public final class VisualizerApp extends JFrame {
 
     private final MassifFramework framework = Massif.defaultFramework();
 
-    private final JTextField seedField = new JTextField("1234", 16);
-    private final JComboBox<SavedSeed> savedCombo = new JComboBox<>();
+    /**
+     * Editable: user types a seed, or picks a saved entry from the dropdown.
+     * The dropdown list renders items as {@code "label (seed)"}; the editor
+     * always shows just the seed number ({@link SavedSeed#toString}).
+     */
+    private final JComboBox<SavedSeed> seedCombo = new JComboBox<>();
     private final JLabel statusLabel = new JLabel(" ");
     private final JTextArea keyListing = new JTextArea();
     private final RenderPanel canvas = new RenderPanel();
@@ -78,12 +85,43 @@ public final class VisualizerApp extends JFrame {
     private void buildUi() {
         JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT));
         controls.add(new JLabel("Seed:"));
-        controls.add(seedField);
+
+        seedCombo.setEditable(true);
+        // Prototype sets combo width to fit the widest label reasonably expected.
+        seedCombo.setPrototypeDisplayValue(new SavedSeed("xxxxxxxxxxxxxxxxxxxx", 0L));
+        // Editor text field is visible when the combo is closed; keep it a
+        // reasonable width so short seeds don't leave the box cramped.
+        if (seedCombo.getEditor().getEditorComponent() instanceof JTextField jtf) {
+            jtf.setColumns(18);
+        }
+        // Dropdown list rendering: "label  (seed)"; the editor still shows
+        // just the seed (because SavedSeed.toString returns the seed number).
+        seedCombo.setRenderer(new DefaultListCellRenderer() {
+            @Override
+            public Component getListCellRendererComponent(JList<?> list, Object value,
+                                                          int index, boolean isSelected,
+                                                          boolean cellHasFocus) {
+                String display;
+                if (value instanceof SavedSeed s) {
+                    display = s.label() + "  (" + s.seed() + ")";
+                } else {
+                    display = value == null ? "" : value.toString();
+                }
+                return super.getListCellRendererComponent(
+                    list, display, index, isSelected, cellHasFocus);
+            }
+        });
+        seedCombo.addActionListener(e -> {
+            if (loadingCombo) return;
+            regenerate();
+        });
+        setSeedText("1234");
+        controls.add(seedCombo);
 
         JButton randomBtn = new JButton("Randomize");
         randomBtn.setToolTipText("Fill the seed with a random long and regenerate");
         randomBtn.addActionListener(e -> {
-            seedField.setText(Long.toString(ThreadLocalRandom.current().nextLong()));
+            setSeedText(Long.toString(ThreadLocalRandom.current().nextLong()));
             regenerate();
         });
         controls.add(randomBtn);
@@ -93,21 +131,9 @@ public final class VisualizerApp extends JFrame {
         saveBtn.addActionListener(e -> promptAndSave());
         controls.add(saveBtn);
 
-        controls.add(new JLabel("Saved:"));
-        savedCombo.setPrototypeDisplayValue(new SavedSeed("wwwwwwwwwwwwwwww", 0L));
-        savedCombo.addActionListener(e -> {
-            if (loadingCombo) return;
-            SavedSeed s = (SavedSeed) savedCombo.getSelectedItem();
-            if (s == null) return;
-            seedField.setText(Long.toString(s.seed()));
-            regenerate();
-        });
-        controls.add(savedCombo);
-
         JButton go = new JButton("Generate");
         go.addActionListener(e -> regenerate());
         controls.add(go);
-        seedField.addActionListener(e -> regenerate());
 
         keyListing.setEditable(false);
         keyListing.setRows(6);
@@ -125,10 +151,24 @@ public final class VisualizerApp extends JFrame {
         add(south, BorderLayout.SOUTH);
     }
 
+    private void setSeedText(String text) {
+        loadingCombo = true;
+        try {
+            seedCombo.getEditor().setItem(text);
+        } finally {
+            loadingCombo = false;
+        }
+    }
+
+    private String currentSeedText() {
+        Object item = seedCombo.getEditor().getItem();
+        return item == null ? "" : item.toString().trim();
+    }
+
     private void regenerate() {
         long seed;
         try {
-            seed = Long.parseLong(seedField.getText().trim());
+            seed = Long.parseLong(currentSeedText());
         } catch (NumberFormatException ex) {
             statusLabel.setText("Seed must be a long integer");
             return;
@@ -163,15 +203,20 @@ public final class VisualizerApp extends JFrame {
     //  Saved-seed persistence
     // ------------------------------------------------------------------
 
-    /** One line per entry in {@link #SEEDS_FILE}, format {@code label\tseed}. */
+    /**
+     * One entry in {@link #SEEDS_FILE}. {@link #toString} returns just the
+     * seed number so that when the user picks an entry from the combo the
+     * editor ends up containing a plain long — the dropdown-list renderer
+     * shows {@code "label  (seed)"} separately.
+     */
     private record SavedSeed(String label, long seed) {
-        @Override public String toString() { return label + "  (" + seed + ")"; }
+        @Override public String toString() { return Long.toString(seed); }
     }
 
     private void promptAndSave() {
         long seed;
         try {
-            seed = Long.parseLong(seedField.getText().trim());
+            seed = Long.parseLong(currentSeedText());
         } catch (NumberFormatException ex) {
             statusLabel.setText("Seed must be a long integer");
             return;
@@ -202,10 +247,12 @@ public final class VisualizerApp extends JFrame {
         List<SavedSeed> entries = readSeeds();
         DefaultComboBoxModel<SavedSeed> model = new DefaultComboBoxModel<>();
         for (SavedSeed e : entries) model.addElement(e);
+        String preserved = currentSeedText();
         loadingCombo = true;
         try {
-            savedCombo.setModel(model);
-            savedCombo.setSelectedIndex(-1); // no entry is "current"
+            seedCombo.setModel(model);
+            seedCombo.setSelectedIndex(-1); // nothing "selected"; editor keeps its text
+            seedCombo.getEditor().setItem(preserved);
         } finally {
             loadingCombo = false;
         }
