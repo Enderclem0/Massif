@@ -3,10 +3,9 @@ package fr.enderclem.massif.blackboard;
 import java.util.Objects;
 
 /**
- * Typed, named handle for a blackboard entry.
- * Identity is by {@code name}; {@code type} is metadata for runtime checks and UI.
- * Keys are registered into a {@link FeatureRegistry} so the visualizer and DAG
- * can enumerate them without reflection.
+ * Typed, named handle for a blackboard entry. Identity is by {@code name};
+ * {@code type} is metadata for runtime checks and UI. Subject to rework in
+ * Phase 1 when the namespaced {@code "core:xxx"} key scheme and registry land.
  */
 public final class FeatureKey<T> {
 

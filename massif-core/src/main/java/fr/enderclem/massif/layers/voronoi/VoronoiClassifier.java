@@ -3,17 +3,16 @@ package fr.enderclem.massif.layers.voronoi;
 import fr.enderclem.massif.primitives.RegionCoord;
 
 /**
- * Pure-function Voronoi cell classifier. Extracted from {@link VoronoiZonesLayer}
- * so that border-aware layers can produce a neighbour region's zone grid on
- * demand without running a full pipeline pass — required for the
- * {@link fr.enderclem.massif.dag.BorderAwareLayer#computeBorderStrip} contract.
+ * Pure-function Voronoi cell classifier. Zone kinds are opaque integer ids in
+ * {@code [0, kindCount)}; the rebuild's zone-type registry will supply that id
+ * space when Phase 3 lands.
  */
 public final class VoronoiClassifier {
 
     private VoronoiClassifier() {}
 
-    public static int[][] classify(long seed, RegionCoord coord, int size) {
-        ZoneSeed[] pool = ZoneSeeds.neighbourhood(seed, coord.rx(), coord.rz(), size);
+    public static int[][] classify(long seed, RegionCoord coord, int size, int kindCount) {
+        ZoneSeed[] pool = ZoneSeeds.neighbourhood(seed, coord.rx(), coord.rz(), size, kindCount);
         int[][] zones = new int[size][size];
         double originX = (double) coord.rx() * size;
         double originZ = (double) coord.rz() * size;
